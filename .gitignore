@@ -1,0 +1,6 @@
+# regenerable / heavy test artifacts
+tests/face.y4m
+tests/turn.y4m
+tests/shots/
+tests/preview_*.jpg
+__pycache__/

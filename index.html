@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d12">
+  <title>Face Mask Camera — live AR masks in your browser</title>
+  <meta name="description" content="Upload any mask or anime image and wear it live on your face. 100% in-browser: MediaPipe Face Landmarker + Three.js. No account, no upload, no server.">
+  <link rel="stylesheet" href="css/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎭</text></svg>">
+</head>
+<body>
+  <!-- WebGL stage -->
+  <canvas id="gl"></canvas>
+  <video id="cam" playsinline muted autoplay></video>
+
+  <!-- ======= Welcome screen ======= -->
+  <div id="welcome" class="screen">
+    <div class="welcome-card">
+      <div class="logo">🎭</div>
+      <h1>Face Mask Camera</h1>
+      <p class="tagline">Upload any mask, anime or animal image — it sticks to your face,
+        blinks when you blink, and opens when you open your mouth.</p>
+      <div class="chips">
+        <span class="chip">MediaPipe 478 landmarks + 52 blendshapes</span>
+        <span class="chip">Three.js face mesh</span>
+        <span class="chip">6-point calibration for any artwork</span>
+        <span class="chip">100% on-device · no backend</span>
+      </div>
+      <button id="btn-start" class="btn primary big">🎥&nbsp; Enable camera &amp; start</button>
+      <div id="boot-status" class="boot-status">Camera permission is asked once. Video never leaves your device.</div>
+      <div class="howto">
+        <div class="step"><b>1</b> Upload a mask image</div>
+        <div class="step"><b>2</b> Drag 6 points to align it</div>
+        <div class="step"><b>3</b> Snap photos &amp; record video</div>
+      </div>
+      <div class="copyright-note">
+        ⚖️ <b>Uploads:</b> only use images you created or have the rights/permission to use.
+        Everything runs locally in your browser — nothing is ever sent to a server.
+      </div>
+    </div>
+  </div>
+
+  <!-- ======= HUD (live view) ======= -->
+  <div id="hud" hidden>
+    <div class="topbar">
+      <div class="stat-chips">
+        <span id="chip-fps" class="stat" title="Render FPS">– fps</span>
+        <span id="chip-track" class="stat"><i class="dot off"></i>no face</span>
+        <span id="chip-pose" class="stat" title="Head pose from face matrix">y0° p0° r0°</span>
+      </div>
+      <div class="topbtns">
+        <button id="btn-rec-chip" class="iconbtn rec" hidden>⏺ <span id="rec-time">0:00</span></button>
+        <button id="btn-gallery" class="iconbtn" title="Mask gallery">🎭</button>
+        <button id="btn-info" class="iconbtn" title="Help & copyright">ℹ️</button>
+      </div>
+    </div>
+
+    <div class="sheet">
+      <div class="maskstrip" id="maskstrip">
+        <button id="btn-upload" class="thumb upload" title="Upload mask image">
+          <span>＋</span><small>Upload</small>
+        </button>
+        <!-- thumbs injected here -->
+      </div>
+
+      <div class="sliders">
+        <label>Opacity
+          <input id="sl-opacity" type="range" min="0" max="100" value="100">
+        </label>
+        <label>Scale
+          <input id="sl-scale" type="range" min="50" max="180" value="100">
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="btn-photo" class="btn" title="Take photo">📷</button>
+        <button id="btn-record" class="btn" title="Record video">⏺</button>
+        <button id="btn-save" class="btn" title="Save mask to gallery">💾</button>
+        <span class="sep"></span>
+        <button id="btn-mirror" class="btn toggle on" title="Mirror view">🪞</button>
+        <button id="btn-expr" class="btn toggle on" title="Expression boost (blendshapes)">😀</button>
+        <button id="btn-calib" class="btn toggle" title="Calibrate mask points">🎯</button>
+        <button id="btn-dots" class="btn toggle" title="Debug landmarks">••</button>
+        <button id="btn-lite" class="btn toggle" title="Lite mode (target 30 fps)">⚡</button>
+        <button id="btn-flipcam" class="btn" title="Switch camera">🔄</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======= Calibration sheet ======= -->
+  <div id="calib" class="calib-panel" hidden>
+    <div class="calib-head">
+      <h2>🎯 Align your mask</h2>
+      <button id="calib-close" class="iconbtn">✕</button>
+    </div>
+    <p class="calib-hint">Drag the 6 dots onto the artwork: <b>eyes, nose, mouth, chin, forehead</b>.
+      Works with any drawing — anime, animal, robot — no real face needed.</p>
+    <div class="calib-stage">
+      <canvas id="calib-canvas"></canvas>
+    </div>
+    <div class="calib-actions">
+      <button id="calib-auto" class="btn small">🎯 Auto-detect</button>
+      <button id="calib-flip" class="btn small">⇄ Flip</button>
+      <button id="calib-reset" class="btn small">↺ Reset</button>
+      <div class="bgmenu">
+        <button id="bg-simple" class="btn small">🧽 Simple BG</button>
+        <button id="bg-ai" class="btn small">✨ AI BG</button>
+        <button id="bg-none" class="btn small">🖼 Original</button>
+      </div>
+      <button id="calib-done" class="btn small primary">✓ Done</button>
+    </div>
+    <div id="calib-progress" class="calib-progress" hidden></div>
+  </div>
+
+  <!-- ======= Gallery modal ======= -->
+  <div id="gallery" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head"><h2>🎭 Mask gallery</h2><button id="gallery-close" class="iconbtn">✕</button></div>
+      <p class="muted small">Built-in masks + masks you saved. Saved masks live only in this browser
+        (localStorage) and are never uploaded anywhere.</p>
+      <div id="gallery-grid" class="gallery-grid"></div>
+    </div>
+  </div>
+
+  <!-- ======= Info / copyright modal ======= -->
+  <div id="info" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head"><h2>ℹ️ About &amp; rights</h2><button id="info-close" class="iconbtn">✕</button></div>
+      <p class="muted small">
+        <b>Face Mask Camera</b> — a Snapchat-style live filter that runs entirely in your browser:
+        MediaPipe Face Landmarker (blendshapes + face transformation matrix) drives a Three.js face
+        mesh textured with your uploaded image, mapped through the canonical face-mesh UVs.
+        The camera feed never leaves your device; there is no backend and no account.
+      </p>
+      <div class="copyright-note">
+        ⚖️ <b>Copyright notice:</b> you may only upload images you created or have the rights or
+        permission to use. Masks you save are stored in this browser's local storage only.
+        If you share photos or recordings, make sure you also have the rights to the mask artwork
+        used in them.
+      </div>
+      <p class="muted small">Tips: use <b>⚡ Lite</b> if the preview lags (drops camera resolution and
+        detects every 2nd frame to hold 30 fps). <b>🎯 Calibrate</b> re-opens the 6-point alignment at
+        any time.</p>
+    </div>
+  </div>
+
+  <!-- ======= Upload copyright gate ======= -->
+  <div id="rights" class="modal" hidden>
+    <div class="modal-card">
+      <div class="modal-head"><h2>⚖️ Before you upload</h2></div>
+      <div class="copyright-note big">
+        Only use images <b>you created</b> or have the <b>rights / permission</b> to use.
+        Fan art and characters may be copyrighted — personal, private use only; don't redistribute
+        what you don't own. Your image is processed <b>entirely on your device</b> and is never
+        uploaded to any server.
+      </div>
+      <label class="checkline">
+        <input type="checkbox" id="rights-check">
+        <span>I confirm I have the rights or permission to use this image.</span>
+      </label>
+      <div class="modal-actions">
+        <button id="rights-cancel" class="btn">Cancel</button>
+        <button id="rights-ok" class="btn primary" disabled>Choose image…</button>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="file-input" accept="image/*" hidden>
+  <div id="toast" class="toast" hidden></div>
+  <div id="flash" class="flash"></div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

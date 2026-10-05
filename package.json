@@ -1,0 +1,7 @@
+{
+  "name": "face-mask-camera",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Client-side AR face mask camera — MediaPipe Face Landmarker + Three.js. No backend."
+}
