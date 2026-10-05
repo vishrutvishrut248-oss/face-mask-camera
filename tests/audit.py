@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Full feature audit: exercises every user-facing control and asserts the
-internal state it should change. Prints a PASS/FAIL matrix."""
+"""Full feature audit (new minimal UI): exercises every user-facing control and
+asserts the internal state it should change. Prints a PASS/FAIL matrix."""
 import os, sys
 from playwright.sync_api import sync_playwright
 
@@ -28,6 +28,11 @@ def main():
                 and 'XNNPACK' not in m.text and 'TensorFlow' not in m.text else None)
         page.on('dialog', lambda d: d.accept('AuditCat'))
 
+        def more_open():
+            if page.evaluate("document.getElementById('more').hidden"):
+                page.click('#btn-more')
+                page.wait_for_selector('#more:not([hidden])')
+
         page.goto('http://127.0.0.1:8000/', wait_until='domcontentloaded')
         page.click('#btn-start')
         page.wait_for_selector('#hud:not([hidden])', timeout=120_000)
@@ -36,23 +41,23 @@ def main():
 
         E = page.evaluate
 
-        # --- sliders ---
-        page.fill('#sl-opacity', '40')
-        page.dispatch_event('#sl-opacity', 'input')
-        check('opacity slider', abs(E('window.__fmc.scene.opacity') - 0.4) < 1e-9,
-              f"opacity={E('window.__fmc.scene.opacity')}")
-        page.fill('#sl-scale', '140')
-        page.dispatch_event('#sl-scale', 'input')
-        check('scale slider', abs(E('window.__fmc.scene.maskScale') - 1.4) < 1e-9,
-              f"scale={E('window.__fmc.scene.maskScale')}")
+        # minimal top-right: ONLY upload + more
+        topbtns = E("[...document.querySelectorAll('.topbtns button')].map(b=>b.id)")
+        check('top-right = upload + more only', topbtns == ['btn-upload', 'btn-more'], str(topbtns))
+
+        # --- sliders (inside ⋯) ---
+        more_open()
+        page.fill('#sl-opacity', '40'); page.dispatch_event('#sl-opacity', 'input')
+        check('opacity slider', abs(E('window.__fmc.scene.opacity') - 0.4) < 1e-9)
+        page.fill('#sl-scale', '140'); page.dispatch_event('#sl-scale', 'input')
+        check('scale slider', abs(E('window.__fmc.scene.maskScale') - 1.4) < 1e-9)
 
         # --- toggles ---
         page.click('#btn-mirror'); check('mirror toggle', E('window.__fmc.scene.mirror') is False)
         page.click('#btn-mirror'); check('mirror back on', E('window.__fmc.scene.mirror') is True)
         page.click('#btn-expr');  check('expression boost toggle', E('window.__fmc.scene.expressionBoost') is False)
         page.click('#btn-expr')
-        page.click('#btn-dots')
-        page.wait_for_timeout(400)
+        page.click('#btn-dots'); page.wait_for_timeout(400)
         check('debug dots visible', E('window.__fmc.scene.dots.visible') is True)
         page.click('#btn-dots')
 
@@ -63,8 +68,19 @@ def main():
                      lms: r.faceLandmarks[0].length }; }''')
         check('blendshapes(52) + face matrix live', info['bs'] == 52 and info['mtx'] == 1 and info['lms'] == 478, str(info))
 
+        # --- full-face coverage: alpha hull includes the face oval ---
+        alpha_min_face = E('''() => {
+            const a = window.__fmc.scene.maskMesh.geometry.getAttribute('aAlpha');
+            // sample cheek/temple vertices (face oval) — should be ~1 now
+            const vs = window.__fmc.scene._vertexForLandmark.bind(window.__fmc.scene);
+            let s = 0; const idx = [234, 454, 109, 338];
+            for (const li of idx) s += a.getX(vs(li));
+            return s / idx.length;
+        }''')
+        check('full-face alpha coverage (oval ~1)', alpha_min_face > 0.9, f'avg={alpha_min_face:.3f}')
+
         # --- mask switching via strip ---
-        page.click('.maskstrip .thumb:nth-of-type(3)')  # robot (after upload btn)
+        page.click('#maskstrip .thumb:nth-of-type(2)')
         page.wait_for_timeout(1200)
         check('mask switch (robot)', E("window.__fmc.state.current.id") == 'builtin-robot')
 
@@ -83,8 +99,7 @@ def main():
         page.click('#bg-none')
         check('original BG button', E('window.__fmc.state.current.processed === window.__fmc.state.current.orig'))
 
-        # AI BG: model streams from CDN on first use (~40 MB); allow up to 90 s,
-        # and accept a graceful error toast if the CDN is unreachable.
+        # AI BG
         page.click('#bg-ai')
         ai_ok = False
         try:
@@ -108,31 +123,30 @@ def main():
         check('upload → calib + bg removal', E('window.__fmc.state.current.processed !== window.__fmc.state.current.orig'))
         page.click('#calib-done')
 
-        # --- save to gallery + delete ---
-        page.click('#btn-save')
-        page.wait_for_timeout(800)
+        # --- save to gallery + delete (inside ⋯) ---
+        more_open()
+        page.click('#btn-save'); page.wait_for_timeout(800)
         saved = E("localStorage.getItem('maskcam.masks.v1') ? JSON.parse(localStorage.getItem('maskcam.masks.v1')).length : 0")
         check('save mask to localStorage', saved == 1, f'count={saved}')
-        page.click('#btn-gallery')
-        page.wait_for_selector('#gallery:not([hidden])')
-        gal_thumbs = E("document.querySelectorAll('#gallery-grid .thumb').length")
-        check('gallery modal lists builtins+saved', gal_thumbs == 4, f'thumbs={gal_thumbs}')
-        page.click('#gallery-grid .thumb .del')   # delete the saved one
+        thumbs = E("document.querySelectorAll('#maskstrip .thumb').length")
+        check('more sheet lists builtins+saved', thumbs == 4, f'thumbs={thumbs}')
+        page.click('#maskstrip .thumb .del')
         page.wait_for_timeout(400)
         saved2 = E("JSON.parse(localStorage.getItem('maskcam.masks.v1')||'[]').length")
         check('delete saved mask', saved2 == 0, f'count={saved2}')
-        page.click('#gallery-close')
 
-        # --- Fix 3 regression: a failed (quota) save must keep previous masks ---
-        page.click('#btn-save'); page.wait_for_timeout(600)          # one saved mask
-        stuffed = E("(() => { try { localStorage.setItem('maskcam.filler','x'.repeat(4900000)); return true; } catch { return false; } })()")
-        page.click('#btn-save'); page.wait_for_timeout(600)          # must fail, keep old
+        # --- Fix 3 regression: quota-failed save keeps old masks ---
+        page.click('#btn-save'); page.wait_for_timeout(600)
+        # greedily fill storage to just below quota (UTF-16: 2 bytes per char)
+        stuffed = E("(() => { let placed = 0; for (let n = 3000000; n >= 100000; n -= 100000) { try { localStorage.setItem('maskcam.filler' + n, 'x'.repeat(n)); placed += n; } catch {} } return placed; })()")
+        page.click('#btn-save'); page.wait_for_timeout(600)
         cnt = E("JSON.parse(localStorage.getItem('maskcam.masks.v1')||'[]').length")
-        check('quota-failed save keeps old masks', cnt == 1, f'stuffed={stuffed} count={cnt}')
-        E("localStorage.removeItem('maskcam.filler')")
+        check('quota-failed save keeps old masks', stuffed > 0 and cnt == 1, f'stuffed={stuffed} count={cnt}')
+        E("Object.keys(localStorage).filter(k=>k.startsWith('maskcam.filler')).forEach(k=>localStorage.removeItem(k))")
 
-        # --- info modal ---
-        page.click('#btn-info'); page.wait_for_selector('#info:not([hidden])')
+        # --- info modal + copyright ---
+        page.click('#btn-info')
+        page.wait_for_selector('#info:not([hidden])')
         has_copy = E("document.querySelector('#info .copyright-note').textContent.includes('Copyright')")
         check('info modal + copyright notice', has_copy)
         page.click('#info-close')
@@ -142,10 +156,11 @@ def main():
             page.click('#btn-photo')
         check('photo capture', dl.value.suggested_filename.endswith('.png'))
         with page.expect_download(timeout=30000) as dl2:
-            page.click('#btn-record'); page.wait_for_timeout(2000); page.click('#btn-record')
-        check('video record', dl2.value.suggested_filename.endswith(('.webm', '.mp4')))
+            page.click('#btn-record'); page.wait_for_timeout(2000); page.click('#btn-rec-chip')
+        check('video record + pill stop', dl2.value.suggested_filename.endswith(('.webm', '.mp4')))
 
         # --- Fix 4 regression: rear camera must not be mirrored ---
+        more_open()
         page.click('#btn-flipcam'); page.wait_for_timeout(2500)
         check('rear cam unmirrored', E('window.__fmc.scene.mirror') is False)
         page.click('#btn-flipcam'); page.wait_for_timeout(2500)
@@ -156,6 +171,12 @@ def main():
         check('lite mode', E('window.__fmc.state.lite') is True and E('window.__fmc.tracker.frameSkip') == 2)
         page.click('#btn-lite'); page.wait_for_timeout(1200)
         check('lite off restores', E('window.__fmc.state.lite') is False)
+
+        # --- smoothness architecture: adaptive detection cadence must engage
+        # when detection is slow (it is, on CI's software renderer) ---
+        perf = E('window.__fmc.perf()')
+        check('adaptive detection cadence engaged', perf['detectEvery'] >= 66 and perf['detectMs'] > 24,
+              f"detectEvery={perf['detectEvery']}ms detectMs={perf['detectMs']}")
 
         browser.close()
 

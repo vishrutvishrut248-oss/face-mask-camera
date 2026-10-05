@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Headless end-to-end smoke test: serves the site, feeds Chromium a fake
-webcam (Y4M with a real face), and walks the full user flow."""
-import os, sys, time, json
+webcam (Y4M with a real face), and walks the full user flow (new minimal UI:
+top-right ＋ / ⋯, controls inside the ⋯ sheet)."""
+import os, sys
 from playwright.sync_api import sync_playwright
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,43 +43,44 @@ def main():
         page.wait_for_selector('#hud:not([hidden])', timeout=120_000)
         print('[2] HUD visible (camera + model + mesh boot OK)')
 
-        # wait for face tracking on the fake video
         page.wait_for_function('window.__fmc && window.__fmc.scene.pose.tracking === true', timeout=60_000)
         print('[3] face tracked (blendshapes + face matrix pipeline live)')
 
-        # let the mask render a few frames
         page.wait_for_timeout(2500)
         fps = page.text_content('#chip-fps')
         pose = page.text_content('#chip-pose')
         print(f'[4] chips: fps="{fps}" pose="{pose}"')
         page.screenshot(path=os.path.join(SHOTS, '1-live-mask.png'))
 
-        # mask actually applied?
         has_mask = page.evaluate('!!(window.__fmc.state.current && window.__fmc.scene.maskTexture)')
         print('[5] mask applied:', has_mask)
         assert has_mask, 'mask texture not set'
 
-        # blendshape + matrix availability from last result
         info = page.evaluate('''() => {
-            const t = window.__fmc.tracker;
-            const r = t.lastResult;
+            const r = window.__fmc.tracker.lastResult;
             return {
               lms: r && r.faceLandmarks ? r.faceLandmarks[0].length : 0,
               bs: r && r.faceBlendshapes && r.faceBlendshapes[0] ? r.faceBlendshapes[0].categories.length : 0,
               mtx: r && r.facialTransformationMatrixes ? r.facialTransformationMatrixes.length : 0,
             };
         }''')
-        print('[6] landmarker outputs:', json.dumps(info))
+        print('[6] landmarker outputs:', info)
         assert info['lms'] == 478 and info['bs'] >= 50 and info['mtx'] == 1
 
-        # calibration panel opens with 6 draggable points
+        # top-right must contain ONLY upload + more
+        topbtns = page.evaluate("[...document.querySelectorAll('.topbtns button')].map(b=>b.id)")
+        print('[7] top-right buttons:', topbtns)
+        assert topbtns == ['btn-upload', 'btn-more']
+
+        # more sheet -> calibration
+        page.click('#btn-more')
+        page.wait_for_selector('#more:not([hidden])')
         page.click('#btn-calib')
         page.wait_for_selector('#calib:not([hidden])', timeout=5000)
         page.wait_for_timeout(600)
         page.screenshot(path=os.path.join(SHOTS, '2-calibration.png'))
-        print('[7] calibration panel open')
+        print('[8] calibration panel open from ⋯ sheet')
 
-        # drag point 4 (chin) to a new spot via pointer events
         before = page.evaluate('JSON.parse(JSON.stringify(window.__fmc.state.current.calib[4]))')
         box = page.locator('#calib-canvas').bounding_box()
         px, py = box['x'] + before['x'] * box['width'], box['y'] + before['y'] * box['height']
@@ -87,65 +89,70 @@ def main():
         page.mouse.move(px, py + 20, steps=4)
         page.mouse.up()
         after = page.evaluate('window.__fmc.state.current.calib[4]')
-        print(f'[8] drag chin point: before={before} after={after}')
+        print(f'[9] drag chin point: before={before} after={after}')
         assert abs(after['y'] - before['y']) > 0.001, 'drag did not move point'
 
-        # close calib, run upload flow with copyright gate
+        # upload flow with copyright gate
         page.click('#calib-close')
         page.click('#btn-upload')
         page.wait_for_selector('#rights:not([hidden])', timeout=5000)
         ok_disabled = page.is_disabled('#rights-ok')
-        print('[9] rights gate shown, continue disabled until consent:', ok_disabled)
+        print('[10] rights gate shown, continue disabled until consent:', ok_disabled)
         assert ok_disabled
         page.check('#rights-check')
         assert not page.is_disabled('#rights-ok')
         page.click('#rights-ok')
         page.set_input_files('#file-input', os.path.join(BASE, 'assets', 'raw', 'cat.png'))
         page.wait_for_selector('#calib:not([hidden])', timeout=15000)
-        print('[10] upload ingested, calibration reopened for the cat art')
-        page.wait_for_timeout(4000)   # async auto-calibrate
+        print('[11] upload ingested, calibration reopened for the cat art')
+        page.wait_for_timeout(4000)
         page.screenshot(path=os.path.join(SHOTS, '3-upload-calib.png'))
-
-        # switch mask from gallery via strip (robot thumb = 2nd builtin)
         page.click('#calib-done')
-        page.wait_for_timeout(300)
 
-        # photo capture (download event)
+        # switch mask from the ⋯ sheet (robot = 2nd thumb)
+        page.click('#btn-more')
+        page.click('#maskstrip .thumb:nth-of-type(2)')
+        page.wait_for_timeout(1200)
+        print('[12] mask switched via ⋯ sheet:', page.evaluate('window.__fmc.state.current.id'))
+
+        # photo capture
         with page.expect_download(timeout=15000) as dl:
             page.click('#btn-photo')
         photo = dl.value
         photo.save_as(os.path.join(SHOTS, '4-photo.png'))
-        print('[11] photo captured:', photo.suggested_filename)
+        print('[13] photo captured:', photo.suggested_filename)
 
-        # video record
+        # video record, stop via floating pill
         with page.expect_download(timeout=30000) as dl2:
             page.click('#btn-record')
             page.wait_for_timeout(2500)
-            page.click('#btn-record')
+            page.click('#btn-rec-chip')
         vid = dl2.value
         vid.save_as(os.path.join(SHOTS, '5-video.webm'))
-        print('[12] recording saved:', vid.suggested_filename)
+        print('[14] recording saved:', vid.suggested_filename)
 
-        # lite mode toggle
+        # lite mode
+        page.click('#btn-more')
         page.click('#btn-lite')
         page.wait_for_timeout(1500)
         lite = page.evaluate('window.__fmc.state.lite')
-        print('[13] lite mode:', lite)
+        print('[15] lite mode:', lite)
         assert lite is True
 
         page.screenshot(path=os.path.join(SHOTS, '6-final.png'))
 
-        # mobile layout pass
+        # mobile layout
         page.set_viewport_size({'width': 390, 'height': 844})
         page.wait_for_timeout(800)
         page.screenshot(path=os.path.join(SHOTS, '7-mobile.png'))
-        page.click('#btn-calib')
-        page.wait_for_timeout(800)
-        page.screenshot(path=os.path.join(SHOTS, '8-mobile-calib.png'))
-        print('[14] mobile layout screenshots taken')
+        page.click('#btn-more')
+        page.wait_for_timeout(600)
+        page.screenshot(path=os.path.join(SHOTS, '8-mobile-more.png'))
+        print('[16] mobile screenshots taken')
         browser.close()
 
     real_errors = [e for e in errors if 'WebGL' not in e and 'SwiftShader' not in e
+                   and 'XNNPACK' not in e and 'TensorFlow' not in e
                    and 'GroupMarkerNotSet' not in e and 'Automatic fallback' not in e
                    and 'GPU' not in e]
     print('\n--- console warnings (informational) ---')

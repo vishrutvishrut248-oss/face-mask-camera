@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0b0d12">
   <title>Face Mask Camera — live AR masks in your browser</title>
   <meta name="description" content="Upload any mask or anime image and wear it live on your face. 100% in-browser: MediaPipe Face Landmarker + Three.js. No account, no upload, no server.">
@@ -19,7 +19,7 @@
     <div class="welcome-card">
       <div class="logo">🎭</div>
       <h1>Face Mask Camera</h1>
-      <p class="tagline">Upload any mask, anime or animal image — it sticks to your face,
+      <p class="tagline">Upload any mask, anime or animal image — it sticks to your whole face,
         blinks when you blink, and opens when you open your mouth.</p>
       <div class="chips">
         <span class="chip">MediaPipe 478 landmarks + 52 blendshapes</span>
@@ -30,9 +30,9 @@
       <button id="btn-start" class="btn primary big">🎥&nbsp; Enable camera &amp; start</button>
       <div id="boot-status" class="boot-status">Camera permission is asked once. Video never leaves your device.</div>
       <div class="howto">
-        <div class="step"><b>1</b> Upload a mask image</div>
+        <div class="step"><b>1</b> Tap ＋ to upload a mask</div>
         <div class="step"><b>2</b> Drag 6 points to align it</div>
-        <div class="step"><b>3</b> Snap photos &amp; record video</div>
+        <div class="step"><b>3</b> ⋯ for masks, photos &amp; video</div>
       </div>
       <div class="copyright-note">
         ⚖️ <b>Uploads:</b> only use images you created or have the rights/permission to use.
@@ -41,29 +41,34 @@
     </div>
   </div>
 
-  <!-- ======= HUD (live view) ======= -->
+  <!-- ======= HUD (live view): minimal — top-right has ONLY upload + more ======= -->
   <div id="hud" hidden>
     <div class="topbar">
       <div class="stat-chips">
         <span id="chip-fps" class="stat" title="Render FPS">– fps</span>
         <span id="chip-track" class="stat"><i class="dot off"></i>no face</span>
-        <span id="chip-pose" class="stat" title="Head pose from face matrix">y0° p0° r0°</span>
+        <span id="chip-pose" class="stat" title="Head pose from face matrix"></span>
       </div>
       <div class="topbtns">
-        <button id="btn-rec-chip" class="iconbtn rec" hidden>⏺ <span id="rec-time">0:00</span></button>
-        <button id="btn-gallery" class="iconbtn" title="Mask gallery">🎭</button>
-        <button id="btn-info" class="iconbtn" title="Help & copyright">ℹ️</button>
+        <button id="btn-upload" class="iconbtn" title="Upload mask image">＋</button>
+        <button id="btn-more" class="iconbtn" title="Masks & controls">⋯</button>
       </div>
     </div>
 
-    <div class="sheet">
-      <div class="maskstrip" id="maskstrip">
-        <button id="btn-upload" class="thumb upload" title="Upload mask image">
-          <span>＋</span><small>Upload</small>
-        </button>
-        <!-- thumbs injected here -->
-      </div>
+    <button id="btn-rec-chip" class="rec-pill" hidden>⏺ <span id="rec-time">0:00</span></button>
+  </div>
 
+  <!-- ======= More sheet (masks + all controls) ======= -->
+  <div id="more" class="more-sheet" hidden>
+    <div class="more-head">
+      <h2>🎭 Masks &amp; controls</h2>
+      <button id="more-close" class="iconbtn">✕</button>
+    </div>
+    <div class="more-body">
+      <h3>Masks</h3>
+      <div id="maskstrip" class="maskgrid"></div>
+
+      <h3>Adjust</h3>
       <div class="sliders">
         <label>Opacity
           <input id="sl-opacity" type="range" min="0" max="100" value="100">
@@ -73,18 +78,25 @@
         </label>
       </div>
 
+      <h3>Capture</h3>
       <div class="actions">
         <button id="btn-photo" class="btn" title="Take photo">📷</button>
         <button id="btn-record" class="btn" title="Record video">⏺</button>
         <button id="btn-save" class="btn" title="Save mask to gallery">💾</button>
-        <span class="sep"></span>
+        <button id="btn-calib" class="btn toggle" title="Calibrate mask points">🎯</button>
+      </div>
+
+      <h3>Options</h3>
+      <div class="actions">
         <button id="btn-mirror" class="btn toggle on" title="Mirror view">🪞</button>
         <button id="btn-expr" class="btn toggle on" title="Expression boost (blendshapes)">😀</button>
-        <button id="btn-calib" class="btn toggle" title="Calibrate mask points">🎯</button>
-        <button id="btn-dots" class="btn toggle" title="Debug landmarks">••</button>
         <button id="btn-lite" class="btn toggle" title="Lite mode (target 30 fps)">⚡</button>
         <button id="btn-flipcam" class="btn" title="Switch camera">🔄</button>
+        <button id="btn-dots" class="btn toggle" title="Debug landmarks">••</button>
+        <button id="btn-info" class="btn" title="Help & copyright">ℹ️</button>
       </div>
+      <p class="more-note">⚡ Lite lowers camera resolution and detects every 2nd frame to hold
+        30 fps on slow devices. Saved masks live only in this browser.</p>
     </div>
   </div>
 
@@ -113,16 +125,6 @@
     <div id="calib-progress" class="calib-progress" hidden></div>
   </div>
 
-  <!-- ======= Gallery modal ======= -->
-  <div id="gallery" class="modal" hidden>
-    <div class="modal-card">
-      <div class="modal-head"><h2>🎭 Mask gallery</h2><button id="gallery-close" class="iconbtn">✕</button></div>
-      <p class="muted small">Built-in masks + masks you saved. Saved masks live only in this browser
-        (localStorage) and are never uploaded anywhere.</p>
-      <div id="gallery-grid" class="gallery-grid"></div>
-    </div>
-  </div>
-
   <!-- ======= Info / copyright modal ======= -->
   <div id="info" class="modal" hidden>
     <div class="modal-card">
@@ -139,9 +141,9 @@
         If you share photos or recordings, make sure you also have the rights to the mask artwork
         used in them.
       </div>
-      <p class="muted small">Tips: use <b>⚡ Lite</b> if the preview lags (drops camera resolution and
-        detects every 2nd frame to hold 30 fps). <b>🎯 Calibrate</b> re-opens the 6-point alignment at
-        any time.</p>
+      <p class="muted small">Tips: the mask covers your full face; use <b>Scale</b> to zoom the
+        artwork. Use <b>⚡ Lite</b> if the preview lags. <b>🎯 Calibrate</b> re-opens the 6-point
+        alignment at any time.</p>
     </div>
   </div>
 

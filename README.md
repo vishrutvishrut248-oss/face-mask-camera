@@ -26,7 +26,12 @@ first use.
 ## Features
 
 - **Live mask on your webcam** — the uploaded image is mapped onto the canonical face-mesh UVs;
-  the mesh deforms with your 478 tracked landmarks, so expressions copy automatically.
+  the mesh deforms with your 478 tracked landmarks, so expressions copy automatically. The alpha
+  hull covers the **full face oval**, so masks cover the whole face.
+- **Smooth by design** — the render loop runs at display rate while face detection runs on an
+  *adaptive cadence* (33-100 ms, based on measured detection cost); landmark snapshots are
+  interpolated between detections, so the mask glides even at 10-15 Hz detection. Default camera
+  is 640×480; pixel ratio is capped (1.5, or 1 in Lite).
 - **Blendshapes + face matrix** — 52 blendshapes drive extra "puppet" micro-deformations
   (blink squeeze, jaw drop, smile stretch); the facial transformation matrix stabilizes the mask
   (EMA-smoothed rigid correction) and feeds the head-pose HUD (yaw/pitch/roll).
@@ -36,6 +41,9 @@ first use.
   Auto-detect tries MediaPipe on the artwork first; manual drag always works.
 - **In-browser background removal** — instant offline flood-fill (global-tolerance, border-seeded)
   plus optional AI removal via @imgly/background-removal; or keep the original.
+- **Minimal live UI** — top-right shows only **＋ upload** and **⋯ more**; the ⋯ sheet holds the
+  mask gallery, opacity/scale sliders, capture buttons and toggles (mirror, expression boost,
+  calibration, debug dots, lite, camera switch). Recording shows a floating red timer pill.
 - **Opacity & scale sliders**, **mirror toggle**, **expression-boost toggle**, landmark debug dots.
 - **📷 Photo capture** and **⏺ video recording** (canvas.captureStream + MediaRecorder, audio
   included when permitted; MP4/WebM depending on browser).

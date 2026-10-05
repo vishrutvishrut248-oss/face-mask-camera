@@ -6,7 +6,7 @@
  */
 import { removeBackgroundFlood } from './geom.js';
 
-export const TEX_SIZE = 512;
+export const TEX_SIZE = 1024;
 
 /** Load a File/Blob into an HTMLImageElement. */
 export function loadImageFile(file) {

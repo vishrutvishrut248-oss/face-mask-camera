@@ -1,5 +1,12 @@
 /* main.js — UI orchestration: boot, camera, upload pipeline, calibration,
- * gallery, capture/record, performance management. No backend anywhere. */
+ * gallery, capture/record, performance management. No backend anywhere.
+ *
+ * Perf model: the render loop runs at display rate; face detection runs on an
+ * adaptive cadence (33→100 ms) based on measured detection cost, and the scene
+ * interpolates between landmark snapshots, so the preview stays smooth even on
+ * slow devices. Default camera is 640×480 (plenty for tracking); ⚡ Lite goes
+ * lower still.
+ */
 import { FaceTracker } from './face.js';
 import { MaskScene, ANCHOR_LANDMARKS } from './scene.js';
 import { parseOBJ } from './geom.js';
@@ -21,15 +28,17 @@ const state = {
   calibOpen: false,
   recording: false,
   current: null,   // { id, name, orig(canvas), processed(canvas), calib[{x,y}x6], flip }
-  calibCache: new Map(), // mask id -> calib
+  calibCache: new Map(),
 };
 const tracker = new FaceTracker();
 const scene = new MaskScene(glCanvas);
 const recorder = new VideoRecorder();
 let cameraStream = null;
 let imageLandmarker = null;
-let rafId = 0, lastT = 0, fpsFrames = 0, fpsLast = 0, lowFpsSince = 0, liteSuggested = false;
+let lastT = 0, fpsFrames = 0, fpsLast = 0, lowFpsSince = 0, liteSuggested = false;
 let recTimer = null, recStartedAt = 0;
+// detection cadence (ms between detectForVideo calls), adaptive
+let detectEvery = 33, lastDetectAt = 0, detectMs = 0;
 
 const DEFAULT_CALIB = [
   { x: 0.345, y: 0.40 }, { x: 0.655, y: 0.40 }, { x: 0.50, y: 0.56 },
@@ -69,7 +78,7 @@ function setBootStatus(msg, isErr = false) {
 /* ------------------------------- camera --------------------------------- */
 async function startCamera() {
   if (cameraStream) cameraStream.getTracks().forEach(t => t.stop());
-  const idealW = state.lite ? 640 : 1280, idealH = state.lite ? 480 : 720;
+  const idealW = state.lite ? 480 : 640, idealH = state.lite ? 360 : 480;
   cameraStream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: state.facing, width: { ideal: idealW }, height: { ideal: idealH } },
     audio: false,
@@ -105,8 +114,6 @@ function anchorsFromLandmarks(lms) {
   });
 }
 
-/** Try to auto-place the 6 calibration points on an uploaded artwork.
- * Returns null when no face-like structure is found (user calibrates manually). */
 async function autoCalibrate(canvas) {
   try {
     const lm = await getImageLandmarker();
@@ -122,7 +129,7 @@ function applyCurrentMask() {
   if (!c || !c.processed || !c.calib) return;
   scene.setMaskTexture(c.processed, c.calib, c.flip);
   renderThumbs();
-  if (document.getElementById('calib').hidden === false) drawCalib();
+  if (state.calibOpen) drawCalib();
 }
 
 async function ingestUpload(file) {
@@ -131,7 +138,7 @@ async function ingestUpload(file) {
     const orig = toMaskCanvas(img);
     let processed = orig;
     const uniform = borderUniformity(orig);
-    if (uniform > 0.5) processed = quickRemoveBackground(orig, 34); // plain bg → instant cutout
+    if (uniform > 0.5) processed = quickRemoveBackground(orig, 34);
     state.current = {
       id: 'user-' + Date.now(),
       name: (file.name || 'mask').replace(/\.[^.]+$/, '').slice(0, 28),
@@ -140,13 +147,11 @@ async function ingestUpload(file) {
     };
     applyCurrentMask();
     openCalib();
-    // async: try auto-detect face in the artwork (anime/art often has none — that's fine).
-    // Guard against races: only apply the result if the same mask is still current.
     const myId = state.current.id;
     autoCalibrate(orig).then(pts => {
       if (pts && state.current && state.current.id === myId) {
         state.current.calib = pts.map(p => ({ x: clamp01(p.x), y: clamp01(p.y) }));
-        state.calibCache.set(state.current.id, state.current.calib);
+        state.calibCache.set(myId, state.current.calib);
         applyCurrentMask();
         toast('Face found in the artwork — points placed automatically. Fine-tune by dragging.');
       }
@@ -217,7 +222,7 @@ function makeThumb(maskLike, { deletable = false } = {}) {
     del.onclick = (e) => {
       e.stopPropagation();
       deleteUserMask(maskLike.id);
-      renderThumbs(); renderGallery();
+      renderThumbs();
       toast('Mask deleted from this browser.');
     };
     b.appendChild(del);
@@ -228,16 +233,9 @@ function makeThumb(maskLike, { deletable = false } = {}) {
 
 function renderThumbs() {
   const strip = $('maskstrip');
-  strip.querySelectorAll('.thumb:not(.upload)').forEach(el => el.remove());
+  strip.innerHTML = '';
   for (const m of BUILTIN_MASKS) strip.appendChild(makeThumb(m));
   for (const m of loadUserMasks()) strip.appendChild(makeThumb(m, { deletable: true }));
-}
-
-function renderGallery() {
-  const grid = $('gallery-grid');
-  grid.innerHTML = '';
-  for (const m of BUILTIN_MASKS) grid.appendChild(makeThumb(m));
-  for (const m of loadUserMasks()) grid.appendChild(makeThumb(m, { deletable: true }));
 }
 
 /* ----------------------------- calibration UI ----------------------------- */
@@ -247,6 +245,7 @@ let dragIdx = -1;
 
 function openCalib() {
   if (!state.current) { toast('Upload or pick a mask first.'); return; }
+  closeMore();
   $('calib').hidden = false;
   state.calibOpen = true;
   $('btn-calib').classList.add('on');
@@ -287,7 +286,6 @@ function drawCalib() {
     calibCtx.arc(x, y, 5, 0, Math.PI * 2);
     calibCtx.fillStyle = meta.color;
     calibCtx.fill();
-    // label
     calibCtx.font = '600 20px system-ui, sans-serif';
     const tw = calibCtx.measureText(meta.label).width;
     const ly = y - 34 < 24 ? y + 46 : y - 34;
@@ -308,7 +306,7 @@ function calibPointerPos(e) {
 }
 calibCanvas.addEventListener('pointerdown', (e) => {
   const p = calibPointerPos(e);
-  let best = -1, bestD = 44 / calibCanvas.getBoundingClientRect().width; // 44 css px
+  let best = -1, bestD = 44 / calibCanvas.getBoundingClientRect().width;
   state.current.calib.forEach((q, i) => {
     const d = Math.hypot(q.x - p.x, q.y - p.y);
     if (d < bestD) { bestD = d; best = i; }
@@ -331,7 +329,7 @@ function moveCalibPoint(p) {
   c.calib[dragIdx] = { x: p.x, y: p.y };
   state.calibCache.set(c.id, c.calib);
   drawCalib();
-  scene.updateCalib(c.calib, c.flip);   // live preview on the face mesh
+  scene.updateCalib(c.calib, c.flip);
 }
 
 /* --------------------------- capture / record ----------------------------- */
@@ -350,7 +348,7 @@ async function takePhoto() {
 async function toggleRecord() {
   if (!state.recording) {
     let audioStream = null;
-    try { audioStream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch { /* silent recording */ }
+    try { audioStream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch { /* silent */ }
     try {
       recorder.start(glCanvas, audioStream);
     } catch (e) {
@@ -360,18 +358,17 @@ async function toggleRecord() {
     state.recording = true;
     recStartedAt = Date.now();
     $('btn-record').classList.add('recording');
-    $('btn-record').textContent = '⏹';
+    closeMore(); // keep the stop pill unobstructed while recording
     $('btn-rec-chip').hidden = false;
     recTimer = setInterval(() => {
       const s = Math.floor((Date.now() - recStartedAt) / 1000);
       $('rec-time').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
     }, 250);
-    toast('⏺ Recording… tap ⏹ to stop.', 2500);
+    toast('⏺ Recording… tap the red timer to stop.', 2500);
   } else {
     state.recording = false;
     clearInterval(recTimer);
     $('btn-record').classList.remove('recording');
-    $('btn-record').textContent = '⏺';
     $('btn-rec-chip').hidden = true;
     const blob = await recorder.stop();
     if (blob && blob.size > 0) {
@@ -386,24 +383,40 @@ async function toggleRecord() {
 
 /* ------------------------------- main loop -------------------------------- */
 function loop(t) {
-  rafId = requestAnimationFrame(loop);
+  requestAnimationFrame(loop);
   const dt = Math.min(0.1, (t - lastT) / 1000 || 0.016);
   lastT = t;
-  const result = tracker.detect(video);
-  if (result && result.faceBlendshapes && result.faceBlendshapes.length) scene.setBlendshapes(result.faceBlendshapes[0]);
-  scene.update(result, dt);
 
-  // fps stats
+  // detection on an adaptive cadence; rendering happens every frame
+  let result = null;
+  const minGap = state.lite ? Math.max(detectEvery, 66) : detectEvery;
+  if (t - lastDetectAt >= minGap) {
+    lastDetectAt = t;
+    const t0 = performance.now();
+    result = tracker.detect(video);
+    const dur = performance.now() - t0;
+    if (dur > 2) detectMs = detectMs * 0.7 + dur * 0.3;
+    // adapt: keep detection cheap enough that render stays smooth
+    if (detectMs > 40) detectEvery = 100;
+    else if (detectMs > 24) detectEvery = 66;
+    else if (detectMs > 13) detectEvery = 40;
+    else detectEvery = 33;
+    if (result && result.faceBlendshapes && result.faceBlendshapes.length) {
+      scene.setBlendshapes(result.faceBlendshapes[0]);
+    }
+  }
+  scene.update(result, t);
+
+  // fps stats + HUD
   fpsFrames++;
   if (t - fpsLast > 500) {
     const fps = fpsFrames * 1000 / (t - fpsLast);
     fpsFrames = 0; fpsLast = t;
     $('chip-fps').textContent = `${Math.round(fps)} fps`;
     const p = scene.pose;
-    $('chip-pose').textContent = `y${p.yaw.toFixed(0)}° p${p.pitch.toFixed(0)}° r${p.roll.toFixed(0)}°`;
+    $('chip-pose').textContent = `y${p.yaw.toFixed(0)}° p${p.pitch.toFixed(0)}°`;
     const on = !!p.tracking;
     $('chip-track').innerHTML = `<i class="dot ${on ? '' : 'off'}"></i>${on ? 'tracking' : 'no face'}`;
-    // auto lite suggestion: sustained low fps
     if (!state.lite) {
       if (fps < 24) {
         if (!lowFpsSince) lowFpsSince = t;
@@ -423,13 +436,18 @@ async function setLite(on) {
   tracker.setLite(on);
   scene.setLite(on);
   $('btn-lite').classList.toggle('on', on);
-  setBootStatus(on ? '⚡ Lite mode: 640×480, detecting every 2nd frame.' : 'Full mode restored.');
+  toast(on ? '⚡ Lite mode on: lower camera res + every-2nd-frame detection.' : 'Full quality restored.', 2500);
   try { await startCamera(); } catch (e) { toast('Could not restart camera.'); }
 }
+
+function openMore() { $('more').hidden = false; $('btn-more').classList.add('on'); }
+function closeMore() { $('more').hidden = true; $('btn-more').classList.remove('on'); }
 
 function bindUI() {
   $('sl-opacity').addEventListener('input', (e) => scene.setOpacity(e.target.value / 100));
   $('sl-scale').addEventListener('input', (e) => scene.setMaskScale(e.target.value / 100));
+  $('btn-more').addEventListener('click', () => ($('more').hidden ? openMore() : closeMore()));
+  $('more-close').addEventListener('click', closeMore);
   $('btn-mirror').addEventListener('click', () => {
     scene.mirror = !scene.mirror;
     $('btn-mirror').classList.toggle('on', scene.mirror);
@@ -447,7 +465,6 @@ function bindUI() {
     state.facing = state.facing === 'user' ? 'environment' : 'user';
     try {
       await startCamera();
-      // selfie cam is mirrored; the rear camera must not be
       scene.mirror = state.facing === 'user';
       $('btn-mirror').classList.toggle('on', scene.mirror);
     } catch {
@@ -494,7 +511,6 @@ function bindUI() {
       const out = await aiRemoveBackground(state.current.orig, (key, cur, total) => {
         prog.textContent = `✨ AI background removal… ${key} ${Math.round(100 * cur / Math.max(1, total))}%`;
       });
-      // fit result back into the TEX_SIZE letterbox frame the calibration uses
       state.current.processed = toMaskCanvas(out);
       applyCurrentMask();
       toast('✨ AI background removal applied.');
@@ -527,29 +543,31 @@ function bindUI() {
     if (f) ingestUpload(f);
   });
 
-  /* save current mask */
+  /* save current mask (stored downscaled to respect localStorage quota) */
   $('btn-save').addEventListener('click', () => {
     const c = state.current;
     if (!c) { toast('Nothing to save yet.'); return; }
     if (c.id.startsWith('builtin-')) { toast('Built-in masks are already in your gallery 😄'); return; }
     const name = (prompt('Name this mask:', c.name) || '').slice(0, 28);
     if (!name) return;
+    const store = document.createElement('canvas');
+    const S = 640;
+    store.width = store.height = S;
+    store.getContext('2d').drawImage(c.processed, 0, 0, S, S);
     const res = saveUserMask({
       id: 'user-' + Date.now(), name,
-      dataURL: c.processed.toDataURL('image/png'),
+      dataURL: store.toDataURL('image/png'),
       calib: c.calib.map(p => ({ x: +p.x.toFixed(4), y: +p.y.toFixed(4) })),
       flip: c.flip,
     });
     if (res.ok) {
       c.id = res.masks[0].id;
-      renderThumbs(); renderGallery();
+      renderThumbs();
       toast(res.dropped ? 'Saved (oldest mask removed to free space).' : '💾 Saved to your gallery.');
     } else toast(res.error);
   });
 
   /* modals */
-  $('btn-gallery').addEventListener('click', () => { renderGallery(); $('gallery').hidden = false; });
-  $('gallery-close').addEventListener('click', () => { $('gallery').hidden = true; });
   $('btn-info').addEventListener('click', () => { $('info').hidden = false; });
   $('info-close').addEventListener('click', () => { $('info').hidden = true; });
   document.querySelectorAll('.modal').forEach(m => {
@@ -576,14 +594,13 @@ async function boot() {
     scene.setFaceModel(parseOBJ(objText));
 
     bindUI();
-    renderThumbs(); renderGallery();
+    renderThumbs();
 
     $('welcome').style.display = 'none';
     $('hud').hidden = false;
     state.started = true;
-    rafId = requestAnimationFrame(loop);
+    requestAnimationFrame(loop);
 
-    // default mask
     applyMaskById('builtin-kitsune').then(() => toast('🎭 Try it: blink, open your mouth, turn your head. Upload your own mask with ＋'));
   } catch (e) {
     console.error(e);
@@ -599,5 +616,8 @@ async function boot() {
 
 $('btn-start').addEventListener('click', boot);
 
-// debug/automation handle (used by the headless smoke test)
-window.__fmc = { state, scene, tracker, applyMaskById, autoCalibrate };
+// debug/automation handle (used by the headless tests)
+window.__fmc = {
+  state, scene, tracker, applyMaskById, autoCalibrate,
+  perf: () => ({ detectEvery, detectMs: Math.round(detectMs), lite: state.lite }),
+};

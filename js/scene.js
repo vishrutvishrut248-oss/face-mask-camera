@@ -1,10 +1,16 @@
 /* scene.js — Three.js rendering: video background + texture-mapped face mesh.
  *
- * Pipeline per frame:
- *   landmarks (478) -> world positions -> stabilize with face transformation
- *   matrix (EMA-smoothed) -> blendshape "puppet" micro-deformations -> mesh.
+ * Perf/smoothness design:
+ *   - Detection runs on its own cadence (main.js); the render loop interpolates
+ *     between the last two landmark snapshots (sampled one interval in the
+ *     past) so the mask glides even when detection runs at 10-15 Hz.
+ *   - No per-frame allocations in the hot path; region vertex lists and the
+ *     landmark->vertex lookup are precomputed once.
+ *   - The facial transformation matrix feeds ONLY the pose HUD (it lives in cm
+ *     while the mesh lives in screen units — applying it caused drift).
  * Mask UVs come from the calibration homography (image pts -> canonical UV
- * anchors); per-vertex alpha fades the mask outside the 6-point hull.
+ * anchors); per-vertex alpha now covers the FULL face oval (not just the
+ * 6-anchor hull) so masks cover the whole face.
  */
 import * as THREE from '../vendor/three.module.min.js';
 import { fitHomography, applyH, inv3x3, convexHull, signedDistToConvexPoly, smoothstep } from './geom.js';
@@ -21,7 +27,11 @@ export const ANCHOR_LANDMARKS = [
   [10],                  // forehead
 ];
 
-/* Blendshape puppet regions (canonical vertex indices). */
+/* MediaPipe FACE_OVAL — used to extend the alpha hull to the whole face. */
+const FACE_OVAL = [10, 338, 297, 332, 284, 397, 361, 288, 397, 365, 379, 378, 400, 377,
+  152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
+
+/* Blendshape puppet regions (canonical landmark indices). */
 const REGION = {
   eyeR: [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7, 25, 26, 27, 28, 29, 30, 56, 190],
   eyeL: [362, 398, 384, 385, 386, 387, 388, 466, 263, 249, 390, 373, 374, 380, 381, 382, 253, 254, 255, 256, 257, 258, 286, 414],
@@ -66,9 +76,9 @@ export class MaskScene {
 
     // video plane
     this.videoTex = null;
-    const planeGeo = new THREE.PlaneGeometry(2, 2);
-    this.videoPlane = new THREE.Mesh(planeGeo, new THREE.MeshBasicMaterial({ color: 0x111111, side: THREE.DoubleSide }));
-    this.videoPlane.position.z = 0;
+    this.videoPlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      new THREE.MeshBasicMaterial({ color: 0x111111, side: THREE.DoubleSide }));
     this.scene.add(this.videoPlane);
 
     // mask mesh (built when OBJ + calibration available)
@@ -93,16 +103,25 @@ export class MaskScene {
     this.debugDots = false;
     this.expressionBoost = true;
     this.lite = false;
+    this.dprCap = 1.5;
 
-    // stabilization state (face matrix EMA)
+    // landmark interpolation snapshots (world-space, 468*3)
+    this._snapPrev = new Float32Array(468 * 3);
+    this._snapCurr = new Float32Array(468 * 3);
+    this._work = new Float32Array(468 * 3);
+    this._tPrev = 0; this._tCurr = 0;
+    this._hasFace = false;
+
+    // pose HUD state (face matrix, smoothed) — HUD only, never applied to mesh
     this._smPos = new THREE.Vector3();
     this._smQuat = new THREE.Quaternion();
     this._smScale = new THREE.Vector3(1, 1, 1);
     this._smInit = false;
-    this._mRaw = new THREE.Matrix4();
-    this._mSm = new THREE.Matrix4();
-    this._mCorr = new THREE.Matrix4();
+    this._tmpM = new THREE.Matrix4();
     this._tmpV = new THREE.Vector3();
+    this._tmpQ = new THREE.Quaternion();
+    this._tmpS = new THREE.Vector3();
+    this._euler = new THREE.Euler();
     this.pose = { yaw: 0, pitch: 0, roll: 0, dist: 1, tracking: false };
 
     this.resize();
@@ -124,7 +143,7 @@ export class MaskScene {
 
   resize() {
     const w = window.innerWidth, h = window.innerHeight;
-    const dpr = Math.min(window.devicePixelRatio || 1, this.lite ? 1 : 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, this.dprCap);
     this.renderer.setPixelRatio(dpr);
     this.renderer.setSize(w, h, false);
     const vw = this.video && this.video.videoWidth ? this.video.videoWidth : 16;
@@ -138,6 +157,7 @@ export class MaskScene {
 
   setLite(on) {
     this.lite = on;
+    this.dprCap = on ? 1 : 1.5;
     this.resize();
   }
 
@@ -166,12 +186,19 @@ export class MaskScene {
     this.anchorUVs = ANCHOR_LANDMARKS.map(group => {
       let u = 0, v = 0;
       for (const li of group) {
-        // find the unique vertex (or first one) whose landmark index == li
         const vi = this._vertexForLandmark(li);
         u += obj.uvs[vi * 2]; v += obj.uvs[vi * 2 + 1];
       }
       return [u / group.length, v / group.length];
     });
+
+    // Precompute region vertex lists (unique vertices) for the puppet pass.
+    this._regions = {};
+    for (const key of Object.keys(REGION)) {
+      const set = new Set();
+      for (const li of REGION[key]) set.add(this._vertexForLandmark(li));
+      this._regions[key] = Uint16Array.from(set);
+    }
     if (this.maskTexture && this.calib) this.setMaskTexture(this.maskTexture.image, this.calib, this.maskFlip);
   }
 
@@ -195,6 +222,7 @@ export class MaskScene {
     tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
     tex.generateMipmaps = true;
     tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.anisotropy = Math.min(4, this.renderer.capabilities.getMaxAnisotropy());
     this.maskTexture = tex;
     this.maskMesh.material.uniforms.map.value = tex;
     this.calib = calib;
@@ -203,7 +231,8 @@ export class MaskScene {
   }
 
   /* Fit homography image->canonical UV from the 6 calibration points, then
-   * invert it to get each mesh vertex's texture coordinate + alpha falloff. */
+   * invert it to get each mesh vertex's texture coordinate. Alpha now covers
+   * the full face oval so the mask covers the whole face. */
   recomputeUVs() {
     if (!this.calib || !this.obj || !this.maskMesh) return;
     let pts = this.calib.map(p => [p.x, 1 - p.y]); // to texture space (v-up)
@@ -218,25 +247,29 @@ export class MaskScene {
     const Hinv = inv3x3(H);
     if (!Hinv) return;
 
-    // centroid of source pts for scale slider
     let cx = 0, cy = 0;
     for (const p of pts) { cx += p[0]; cy += p[1]; }
     cx /= pts.length; cy /= pts.length;
 
     const uvAttr = this.maskMesh.geometry.getAttribute('uv');
     const alphaAttr = this.maskMesh.geometry.getAttribute('aAlpha');
-    const hull = convexHull(this.anchorUVs);
+    // full-face coverage: hull of the 6 anchors + the face oval
+    const hullPts = this.anchorUVs.slice();
+    for (const li of FACE_OVAL) {
+      const vi = this._vertexForLandmark(li);
+      hullPts.push([this.obj.uvs[vi * 2], this.obj.uvs[vi * 2 + 1]]);
+    }
+    const hull = convexHull(hullPts);
     const s = Math.max(0.2, this.maskScale);
 
     for (let i = 0; i < this.obj.vertexCount; i++) {
       const u = this.obj.uvs[i * 2], v = this.obj.uvs[i * 2 + 1];
       let [tu, tv] = applyH(Hinv, u, v);
-      // scale slider: zoom the image around the source centroid
       tu = cx + (tu - cx) / s;
       tv = cy + (tv - cy) / s;
       uvAttr.setXY(i, tu, tv);
       const d = signedDistToConvexPoly(u, v, hull);
-      alphaAttr.setX(i, 1 - smoothstep(0.012, 0.085, d));
+      alphaAttr.setX(i, 1 - smoothstep(0.03, 0.14, d));
     }
     uvAttr.needsUpdate = true;
     alphaAttr.needsUpdate = true;
@@ -252,138 +285,109 @@ export class MaskScene {
   setMaskScale(s) { this.maskScale = s; this.recomputeUVs(); }
   setOpacity(o) { this.opacity = o; }
 
-  /** Main per-frame update. result = FaceLandmarker result (or null). */
-  update(result, dt) {
-    if (this.video && this.videoTex) this.videoTex.needsUpdate = true;
+  /** Store a new landmark snapshot (world space) for interpolation. */
+  pushLandmarks(lms, ts) {
+    this._snapPrev.set(this._snapCurr);
+    this._tPrev = this._tCurr || ts;
+    this._tCurr = ts;
+    const a = this.aspect;
+    for (let i = 0; i < 468 && i < lms.length; i++) {
+      const lm = lms[i];
+      const x = this.mirror ? 1 - lm.x : lm.x;
+      this._snapCurr[i * 3] = (x - 0.5) * 2 * a;
+      this._snapCurr[i * 3 + 1] = (0.5 - lm.y) * 2;
+      this._snapCurr[i * 3 + 2] = -lm.z * 2 * a;
+    }
+    this._hasFace = true;
+  }
+
+  /** Main per-frame update. result = fresh FaceLandmarker result or null. */
+  update(result, nowMs) {
+    if (this.videoTex) this.videoTex.needsUpdate = true;
     this.videoPlane.scale.set(this.mirror ? -this.aspect : this.aspect, 1, 1);
 
-    const hasFace = !!(result && result.faceLandmarks && result.faceLandmarks.length);
-    this.pose.tracking = hasFace;
-    if (hasFace && this.maskMesh) {
-      const lms = result.faceLandmarks[0];
-      this._updateStabilization(result, dt);
-      this._updateMesh(lms);
-      this._updateDots(lms);
+    if (result && result.faceLandmarks && result.faceLandmarks.length) {
+      this.pushLandmarks(result.faceLandmarks[0], nowMs);
+      this._updatePoseHUD(result, nowMs);
     }
+    this.pose.tracking = this._hasFace;
+
     if (this.maskMesh) {
-      this.maskMesh.visible = hasFace;
+      this.maskMesh.visible = this._hasFace;
       this.maskMesh.material.uniforms.uOpacity.value = this.opacity;
+      if (this._hasFace) this._updateMesh(nowMs);
     }
-    this.dots.visible = this.debugDots && hasFace;
+    this.dots.visible = this.debugDots && this._hasFace;
+    if (this.dots.visible) this._updateDots(nowMs);
     this.renderer.render(this.scene, this.camera);
   }
 
-  _lmToWorld(lm, out) {
-    const x = this.mirror ? 1 - lm.x : lm.x;
-    out[0] = (x - 0.5) * 2 * this.aspect;
-    out[1] = (0.5 - lm.y) * 2;
-    out[2] = -lm.z * 2 * this.aspect;
+  /* Interpolated sample one detection-interval in the past: perfectly smooth
+   * glide at any detection Hz, at the cost of one interval of latency. */
+  _interpAlpha(nowMs) {
+    const interval = this._tCurr - this._tPrev;
+    if (interval <= 0) return 1;
+    const sampleT = nowMs - interval;
+    return Math.max(0, Math.min(1, (sampleT - this._tPrev) / interval));
   }
 
-  /* EMA-smooth the face transformation matrix; correction C = S * M^-1 is
-   * applied to all vertices to stabilize the mask without losing expressions. */
-  _updateStabilization(result, dt) {
-    const data = result.facialTransformationMatrixes && result.facialTransformationMatrixes[0]
-      ? result.facialTransformationMatrixes[0].data : null;
-    if (!data) return;
-    this._mRaw.fromArray(Array.from(data)); // column-major
-    this._mRaw.decompose(this._tmpV, this._rawQuat || (this._rawQuat = new THREE.Quaternion()), this._rawScale || (this._rawScale = new THREE.Vector3()));
-    const k = Math.min(1, dt * 9); // ~110ms time constant
-    if (!this._smInit) {
-      this._smPos.copy(this._tmpV);
-      this._smQuat.copy(this._rawQuat);
-      this._smScale.copy(this._rawScale);
-      this._smInit = true;
-    } else {
-      this._smPos.lerp(this._tmpV, k);
-      this._smQuat.slerp(this._rawQuat, k);
-      this._smScale.lerp(this._rawScale, k);
-    }
-    this._mSm.compose(this._smPos, this._smQuat, this._smScale);
-    // NOTE: the smoothed matrix feeds the pose HUD only. It is NOT applied to the
-    // mesh (see _updateMesh): the matrix lives in cm while the mesh is in screen
-    // units, so composing S*M^-1 and applying it made the mask drift on head turns.
-    const e = new THREE.Euler().setFromQuaternion(this._smQuat, 'YXZ');
-    this.pose.yaw = e.y * 180 / Math.PI;
-    this.pose.pitch = e.x * 180 / Math.PI;
-    this.pose.roll = e.z * 180 / Math.PI;
-    this.pose.dist = this._smScale.x || 1;
+  _fillInterp(nowMs) {
+    const a = this._interpAlpha(nowMs);
+    const b = 1 - a;
+    const P = this._snapPrev, C = this._snapCurr, W = this._work;
+    for (let i = 0; i < W.length; i++) W[i] = P[i] * b + C[i] * a;
+    return W;
   }
 
-  _updateMesh(lms) {
+  _updateMesh(nowMs) {
+    const W = this._fillInterp(nowMs);
     const geo = this.maskMesh.geometry;
     const pos = geo.getAttribute('position');
     const lmap = this.obj.landmarkIndexOfVertex;
     const n = this.obj.vertexCount;
-    const tmp = [0, 0, 0];
-    // landmark EMA smoothing (light) for shimmer reduction
-    if (!this._lmSmooth) this._lmSmooth = new Float32Array(478 * 3);
     for (let i = 0; i < n; i++) {
-      const li = lmap[i];
-      const lm = lms[li] || lms[0];
-      this._lmToWorld(lm, tmp);
-      const o = li * 3;
-      const a = 0.55;
-      this._lmSmooth[o] += (tmp[0] - this._lmSmooth[o]) * a;
-      this._lmSmooth[o + 1] += (tmp[1] - this._lmSmooth[o + 1]) * a;
-      this._lmSmooth[o + 2] += (tmp[2] - this._lmSmooth[o + 2]) * a;
-      this._tmpV.set(this._lmSmooth[o], this._lmSmooth[o + 1], this._lmSmooth[o + 2]);
-      // Do NOT apply _mCorr here: matrix is in cm (z about -30), mesh is in screen units (+-1).
-      // Landmarks are already smoothed above. Matrix is used for the pose HUD only.
-      pos.setXYZ(i, this._tmpV.x, this._tmpV.y, this._tmpV.z + 0.002);
+      const o = lmap[i] * 3;
+      pos.setXYZ(i, W[o], W[o + 1], W[o + 2] + 0.002);
     }
-    if (this.expressionBoost) this._applyPuppet(lms, pos);
+    if (this.expressionBoost) this._applyPuppet(pos);
     pos.needsUpdate = true;
-    geo.computeBoundingSphere && (geo.boundingSphere = null);
   }
 
   /* Blendshape-driven micro-deformations on top of landmark positions:
    * extra blink squeeze, jaw drop, smile stretch. */
-  _applyPuppet(lms, pos) {
-    const bs = (name) => {
-      const arr = this._lastBlendshapes;
-      return arr ? (arr[name] || 0) : 0;
-    };
-    const blinkR = bs('eyeBlinkRight'), blinkL = bs('eyeBlinkLeft');
-    const jaw = bs('jawOpen'), smileL = bs('mouthSmileLeft'), smileR = bs('mouthSmileRight');
-    if (blinkR + blinkL + jaw + smileL + smileR < 0.02) return;
+  _applyPuppet(pos) {
+    const m = this._lastBlendshapes;
+    if (!m) return;
+    const blinkR = m.eyeBlinkRight || 0, blinkL = m.eyeBlinkLeft || 0;
+    const jaw = m.jawOpen || 0, smile = Math.max(m.mouthSmileLeft || 0, m.mouthSmileRight || 0);
+    if (blinkR + blinkL + jaw + smile < 0.05) return;
 
-    const regionPos = (idxs, out) => {
-      let cx = 0, cy = 0;
-      const pts = [];
-      for (const li of idxs) {
-        const vi = this._vertexForLandmark(li);
-        const x = pos.getX(vi), y = pos.getY(vi);
-        cx += x; cy += y;
-        pts.push(vi);
+    const scaleRegionY = (verts, f) => {
+      let cy = 0;
+      for (let k = 0; k < verts.length; k++) cy += pos.getY(verts[k]);
+      cy /= verts.length;
+      for (let k = 0; k < verts.length; k++) {
+        const vi = verts[k];
+        pos.setY(vi, cy + (pos.getY(vi) - cy) * f);
       }
-      out.cx = cx / idxs.length; out.cy = cy / idxs.length; out.pts = pts;
-      return out;
     };
-    const scratch = {};
-    const scaleRegionY = (idxs, f) => {
-      const r = regionPos(idxs, scratch);
-      for (const vi of r.pts) pos.setY(vi, r.cy + (pos.getY(vi) - r.cy) * f);
-    };
-    if (blinkR > 0.05) scaleRegionY(REGION.eyeR, 1 - 0.4 * blinkR);
-    if (blinkL > 0.05) scaleRegionY(REGION.eyeL, 1 - 0.4 * blinkL);
+    if (blinkR > 0.05) scaleRegionY(this._regions.eyeR, 1 - 0.4 * blinkR);
+    if (blinkL > 0.05) scaleRegionY(this._regions.eyeL, 1 - 0.4 * blinkL);
     if (jaw > 0.05) {
-      const r = regionPos(REGION.mouth, scratch);
-      const f = 1 + 0.18 * jaw;
-      for (const vi of r.pts) {
-        pos.setY(vi, r.cy + (pos.getY(vi) - r.cy) * f);
-        if (pos.getY(vi) < r.cy) pos.setY(vi, pos.getY(vi) - 0.02 * jaw * this.pose.dist);
-      }
-      const jr = regionPos(REGION.jaw, scratch);
-      for (const vi of jr.pts) pos.setY(vi, pos.getY(vi) - 0.012 * jaw * this.pose.dist);
+      scaleRegionY(this._regions.mouth, 1 + 0.18 * jaw);
+      const drop = 0.012 * jaw;
+      const jv = this._regions.jaw;
+      for (let k = 0; k < jv.length; k++) pos.setY(jv[k], pos.getY(jv[k]) - drop);
     }
-    if (smileL + smileR > 0.1) {
-      // symmetric mouth widen driven by the stronger smile side
-      const r = regionPos(REGION.mouth, scratch);
-      const f = 1 + 0.12 * Math.max(smileL, smileR);
-      for (const vi of r.pts) {
-        const dx = pos.getX(vi) - r.cx;
-        pos.setX(vi, r.cx + dx * f);
+    if (smile > 0.1) {
+      const mv = this._regions.mouth;
+      let cx = 0;
+      for (let k = 0; k < mv.length; k++) cx += pos.getX(mv[k]);
+      cx /= mv.length;
+      const f = 1 + 0.12 * smile;
+      for (let k = 0; k < mv.length; k++) {
+        const vi = mv[k];
+        pos.setX(vi, cx + (pos.getX(vi) - cx) * f);
       }
     }
   }
@@ -395,15 +399,37 @@ export class MaskScene {
     this._lastBlendshapes = m;
   }
 
-  _updateDots(lms) {
+  /* Face transformation matrix -> smoothed Euler angles for the HUD only. */
+  _updatePoseHUD(result, dt) {
+    const data = result.facialTransformationMatrixes && result.facialTransformationMatrixes[0]
+      ? result.facialTransformationMatrixes[0].data : null;
+    if (!data) return;
+    this._tmpM.fromArray(Array.from(data));
+    this._tmpM.decompose(this._tmpV, this._tmpQ, this._tmpS);
+    const k = Math.min(1, dt * 9);
+    if (!this._smInit) {
+      this._smPos.copy(this._tmpV); this._smQuat.copy(this._tmpQ); this._smScale.copy(this._tmpS);
+      this._smInit = true;
+    } else {
+      this._smPos.lerp(this._tmpV, k);
+      this._smQuat.slerp(this._tmpQ, k);
+      this._smScale.lerp(this._tmpS, k);
+    }
+    this._euler.setFromQuaternion(this._smQuat, 'YXZ');
+    this.pose.yaw = this._euler.y * 180 / Math.PI;
+    this.pose.pitch = this._euler.x * 180 / Math.PI;
+    this.pose.roll = this._euler.z * 180 / Math.PI;
+    this.pose.dist = this._smScale.x || 1;
+  }
+
+  _updateDots(nowMs) {
+    const W = this._fillInterp(nowMs);
     const pos = this.dots.geometry.getAttribute('position');
-    const tmp = [0, 0, 0];
-    for (let i = 0; i < lms.length && i < 478; i++) {
-      this._lmToWorld(lms[i], tmp);
-      pos.setXYZ(i, tmp[0], tmp[1], tmp[2] + 0.004);
+    for (let i = 0; i < 468; i++) {
+      pos.setXYZ(i, W[i * 3], W[i * 3 + 1], W[i * 3 + 2] + 0.004);
     }
     pos.needsUpdate = true;
-    this.dots.geometry.setDrawRange(0, lms.length);
+    this.dots.geometry.setDrawRange(0, 468);
   }
 
   renderOnce() { this.renderer.render(this.scene, this.camera); }

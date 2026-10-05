@@ -6,7 +6,7 @@ from PIL import Image
 import numpy as np
 from collections import deque
 
-TEX = 512
+TEX = 1024
 
 def cutout(img: Image.Image, feather_passes: int = 2) -> Image.Image:
     """Chroma-key cutout for art rendered on a solid magenta backdrop:
