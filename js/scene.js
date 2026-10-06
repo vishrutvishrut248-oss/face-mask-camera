@@ -301,15 +301,23 @@ export class MaskScene {
     this._hasFace = true;
   }
 
+  /** Consume a fresh detection result (arrives async from the worker). */
+  ingest(result, tsMs) {
+    if (result.faceLandmarks && result.faceLandmarks.length) {
+      this.pushLandmarks(result.faceLandmarks[0], tsMs);
+      this._updatePoseHUD(result, tsMs);
+    }
+    if (result.faceBlendshapes && result.faceBlendshapes.length) {
+      this.setBlendshapes(result.faceBlendshapes[0]);
+    }
+  }
+
   /** Main per-frame update. result = fresh FaceLandmarker result or null. */
   update(result, nowMs) {
+    if (result) this.ingest(result, nowMs);
     if (this.videoTex) this.videoTex.needsUpdate = true;
     this.videoPlane.scale.set(this.mirror ? -this.aspect : this.aspect, 1, 1);
 
-    if (result && result.faceLandmarks && result.faceLandmarks.length) {
-      this.pushLandmarks(result.faceLandmarks[0], nowMs);
-      this._updatePoseHUD(result, nowMs);
-    }
     this.pose.tracking = this._hasFace;
 
     if (this.maskMesh) {

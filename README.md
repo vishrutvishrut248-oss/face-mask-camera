@@ -28,10 +28,12 @@ first use.
 - **Live mask on your webcam** — the uploaded image is mapped onto the canonical face-mesh UVs;
   the mesh deforms with your 478 tracked landmarks, so expressions copy automatically. The alpha
   hull covers the **full face oval**, so masks cover the whole face.
-- **Smooth by design** — the render loop runs at display rate while face detection runs on an
-  *adaptive cadence* (33-100 ms, based on measured detection cost); landmark snapshots are
+- **Smooth by design** — face detection runs in a **dedicated Web Worker**, so the MediaPipe
+  WASM inference never blocks the render loop (which targets your display's 60 fps). Detection
+  runs on an *adaptive cadence* (33-100 ms, based on measured cost) and landmark snapshots are
   interpolated between detections, so the mask glides even at 10-15 Hz detection. Default camera
-  is 640×480; pixel ratio is capped (1.5, or 1 in Lite).
+  is 640×480; pixel ratio is capped (1.5, or 1 in Lite). If a worker is unavailable the app
+  falls back to main-thread detection automatically.
 - **Blendshapes + face matrix** — 52 blendshapes drive extra "puppet" micro-deformations
   (blink squeeze, jaw drop, smile stretch); the facial transformation matrix stabilizes the mask
   (EMA-smoothed rigid correction) and feeds the head-pose HUD (yaw/pitch/roll).
@@ -47,7 +49,7 @@ first use.
 - **Opacity & scale sliders**, **mirror toggle**, **expression-boost toggle**, landmark debug dots.
 - **📷 Photo capture** and **⏺ video recording** (canvas.captureStream + MediaRecorder, audio
   included when permitted; MP4/WebM depending on browser).
-- **Mask gallery** — 3 built-in masks + masks you save, kept in `localStorage` only.
+- **Mask gallery** — 4 built-in masks (kitsune, robot, cat, anime) + masks you save, kept in `localStorage` only.
 - **⚡ Lite mode** for slow devices (640×480, detection every 2nd frame, pixelRatio 1) with an
   automatic "switch to Lite?" suggestion when FPS stays under ~24 (target 30 fps).
 - **Mobile-friendly** — bottom-sheet controls, touch-drag calibration (pointer events),

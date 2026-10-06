@@ -129,7 +129,7 @@ def main():
         saved = E("localStorage.getItem('maskcam.masks.v1') ? JSON.parse(localStorage.getItem('maskcam.masks.v1')).length : 0")
         check('save mask to localStorage', saved == 1, f'count={saved}')
         thumbs = E("document.querySelectorAll('#maskstrip .thumb').length")
-        check('more sheet lists builtins+saved', thumbs == 4, f'thumbs={thumbs}')
+        check('more sheet lists builtins+saved', thumbs == 5, f'thumbs={thumbs}')
         page.click('#maskstrip .thumb .del')
         page.wait_for_timeout(400)
         saved2 = E("JSON.parse(localStorage.getItem('maskcam.masks.v1')||'[]').length")
@@ -156,7 +156,11 @@ def main():
             page.click('#btn-photo')
         check('photo capture', dl.value.suggested_filename.endswith('.png'))
         with page.expect_download(timeout=30000) as dl2:
-            page.click('#btn-record'); page.wait_for_timeout(2000); page.click('#btn-rec-chip')
+            page.click('#btn-record'); page.wait_for_timeout(2000)
+            # CI software GL: captureStream readback starves rAF, so playwright
+            # actionability can starve mid-recording; stop via JS click instead
+            # (same app code path as a user tap).
+            E("document.getElementById('btn-rec-chip').click()")
         check('video record + pill stop', dl2.value.suggested_filename.endswith(('.webm', '.mp4')))
 
         # --- Fix 4 regression: rear camera must not be mirrored ---
@@ -168,7 +172,7 @@ def main():
 
         # --- lite mode ---
         page.click('#btn-lite'); page.wait_for_timeout(1500)
-        check('lite mode', E('window.__fmc.state.lite') is True and E('window.__fmc.tracker.frameSkip') == 2)
+        check('lite mode', E('window.__fmc.state.lite') is True and E('window.__fmc.scene.dprCap') == 1)
         page.click('#btn-lite'); page.wait_for_timeout(1200)
         check('lite off restores', E('window.__fmc.state.lite') is False)
 

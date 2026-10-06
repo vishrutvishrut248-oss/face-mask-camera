@@ -4,6 +4,7 @@ export const BUILTIN_MASKS = [
   { id: 'builtin-kitsune', name: 'Kitsune', src: 'assets/masks/kitsune.png', builtin: true },
   { id: 'builtin-robot', name: 'Robot', src: 'assets/masks/robot.png', builtin: true },
   { id: 'builtin-cat', name: 'Cat', src: 'assets/masks/cat.png', builtin: true },
+  { id: 'builtin-anime', name: 'Anime', src: 'assets/masks/anime.png', builtin: true },
 ];
 
 const KEY = 'maskcam.masks.v1';

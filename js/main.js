@@ -85,7 +85,6 @@ async function startCamera() {
   });
   video.srcObject = cameraStream;
   await video.play();
-  tracker.lastVideoTime = -1;
   scene.attachVideo(video);
 }
 
@@ -347,8 +346,13 @@ async function takePhoto() {
 
 async function toggleRecord() {
   if (!state.recording) {
+    // mic is optional; never let a stalled permission prompt block recording
     let audioStream = null;
-    try { audioStream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch { /* silent */ }
+    try {
+      const audioP = navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
+      audioStream = await Promise.race([audioP, new Promise((r) => setTimeout(() => r(null), 1500))]);
+      audioP.then((s) => { if (s && s !== audioStream) s.getTracks().forEach((t) => t.stop()); });
+    } catch { /* silent */ }
     try {
       recorder.start(glCanvas, audioStream);
     } catch (e) {
@@ -387,25 +391,14 @@ function loop(t) {
   const dt = Math.min(0.1, (t - lastT) / 1000 || 0.016);
   lastT = t;
 
-  // detection on an adaptive cadence; rendering happens every frame
-  let result = null;
+  // Detection runs OFF-thread (worker) on an adaptive cadence; the render loop
+  // below runs at display rate every frame, decoupled from detection cost.
   const minGap = state.lite ? Math.max(detectEvery, 66) : detectEvery;
   if (t - lastDetectAt >= minGap) {
     lastDetectAt = t;
-    const t0 = performance.now();
-    result = tracker.detect(video);
-    const dur = performance.now() - t0;
-    if (dur > 2) detectMs = detectMs * 0.7 + dur * 0.3;
-    // adapt: keep detection cheap enough that render stays smooth
-    if (detectMs > 40) detectEvery = 100;
-    else if (detectMs > 24) detectEvery = 66;
-    else if (detectMs > 13) detectEvery = 40;
-    else detectEvery = 33;
-    if (result && result.faceBlendshapes && result.faceBlendshapes.length) {
-      scene.setBlendshapes(result.faceBlendshapes[0]);
-    }
+    tracker.requestDetect(video, t);
   }
-  scene.update(result, t);
+  scene.update(null, t);
 
   // fps stats + HUD
   fpsFrames++;
@@ -433,10 +426,9 @@ function loop(t) {
 async function setLite(on) {
   if (state.lite === on) return;
   state.lite = on;
-  tracker.setLite(on);
   scene.setLite(on);
   $('btn-lite').classList.toggle('on', on);
-  toast(on ? '⚡ Lite mode on: lower camera res + every-2nd-frame detection.' : 'Full quality restored.', 2500);
+  toast(on ? '⚡ Lite mode on: lower camera res + throttled detection.' : 'Full quality restored.', 2500);
   try { await startCamera(); } catch (e) { toast('Could not restart camera.'); }
 }
 
@@ -584,6 +576,16 @@ async function boot() {
     await startCamera();
 
     setBootStatus('Loading MediaPipe face landmarker (3.7 MB, local)…');
+    // detection results stream back from the worker; adapt cadence + feed scene
+    tracker.onResult = (result, ts, cost) => {
+      if (cost > 2) detectMs = detectMs * 0.7 + cost * 0.3;
+      // adapt: keep detection cheap enough that the render loop stays at 60
+      if (detectMs > 40) detectEvery = 100;
+      else if (detectMs > 24) detectEvery = 66;
+      else if (detectMs > 13) detectEvery = 40;
+      else detectEvery = 33;
+      scene.ingest(result, ts);
+    };
     tracker.onStatus = (s) => {
       if (s === 'loading-model') setBootStatus('Loading face model + blendshapes…');
     };
