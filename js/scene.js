@@ -27,6 +27,18 @@ export const ANCHOR_LANDMARKS = [
   [10],                  // forehead
 ];
 
+/* Extra structural anchors (auto-detected on uploaded art) so the homography
+ * fits the WHOLE face structure — mouth corners, brows, cheeks — not just the
+ * 6 UI points. Order: L/R pairs adjacent for mirror swapping. */
+export const EXTRA_ANCHOR_LANDMARKS = [
+  [61],            // mouth corner L
+  [291],           // mouth corner R
+  [70, 104, 105],  // brow L
+  [300, 344, 345], // brow R
+  [234],           // cheek L
+  [454],           // cheek R
+];
+
 /* MediaPipe FACE_OVAL — used to extend the alpha hull to the whole face. */
 const FACE_OVAL = [10, 338, 297, 332, 284, 397, 361, 288, 397, 365, 379, 378, 400, 377,
   152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
@@ -54,10 +66,34 @@ const MASK_VERT = /* glsl */`
 const MASK_FRAG = /* glsl */`
   uniform sampler2D map;
   uniform float uOpacity;
+  uniform float uBlinkL; uniform float uBlinkR; uniform float uJaw;
+  uniform vec2 uEyeL; uniform vec2 uEyeR; uniform vec2 uMouth;
   varying vec2 vUv;
   varying float vAlpha;
+
+  /* AI expression transfer: warp the texture sample so the DRAWN eyes close
+   * when your eyes close (blendshape-driven), and the drawn mouth opens with
+   * your jaw. Sampling expands vertically around an eye => the drawn eye
+   * collapses into a lash line; zooming into the mouth => drawn mouth opens. */
+  vec2 warpEye(vec2 uv, vec2 c, float b) {
+    vec2 d = uv - c;
+    float w = 1.0 - smoothstep(0.06, 0.20, length(d * vec2(1.0, 1.7)));
+    d.y *= 1.0 + (b * 2.2) * w;
+    d.y -= 0.015 * b * w;
+    return c + d;
+  }
+  vec2 warpMouth(vec2 uv, vec2 c, float j) {
+    vec2 d = uv - c;
+    float w = 1.0 - smoothstep(0.05, 0.18, length(d * vec2(1.0, 1.4)));
+    d *= 1.0 - 0.5 * j * w;
+    d.y -= 0.02 * j * w;
+    return c + d;
+  }
   void main() {
-    vec4 t = texture2D(map, vUv);
+    vec2 uv = warpEye(vUv, uEyeL, uBlinkL);
+    uv = warpEye(uv, uEyeR, uBlinkR);
+    uv = warpMouth(uv, uMouth, uJaw);
+    vec4 t = texture2D(map, clamp(uv, 0.0, 1.0));
     float a = t.a * vAlpha * uOpacity;
     if (a < 0.004) discard;
     gl_FragColor = vec4(t.rgb, a);
@@ -109,6 +145,8 @@ export class MaskScene {
     this._snapPrev = new Float32Array(468 * 3);
     this._snapCurr = new Float32Array(468 * 3);
     this._work = new Float32Array(468 * 3);
+    this._smW = new Float32Array(468 * 3);
+    this._smInitW = false; this._smLast = 0; this._lastNow = 0; this._hadFace = false;
     this._tPrev = 0; this._tCurr = 0;
     this._hasFace = false;
 
@@ -172,7 +210,13 @@ export class MaskScene {
     geo.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array(n), 1));
     geo.setIndex(new THREE.BufferAttribute(obj.indices, 1));
     const mat = new THREE.ShaderMaterial({
-      uniforms: { map: { value: null }, uOpacity: { value: 1 } },
+      uniforms: {
+        map: { value: null }, uOpacity: { value: 1 },
+        uBlinkL: { value: 0 }, uBlinkR: { value: 0 }, uJaw: { value: 0 },
+        uEyeL: { value: new THREE.Vector2(0.35, 0.6) },
+        uEyeR: { value: new THREE.Vector2(0.65, 0.6) },
+        uMouth: { value: new THREE.Vector2(0.5, 0.3) },
+      },
       vertexShader: MASK_VERT, fragmentShader: MASK_FRAG,
       transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
     });
@@ -183,14 +227,16 @@ export class MaskScene {
     this.scene.add(this.maskMesh);
 
     // Precompute anchor UVs in canonical texture space (vt, v-up).
-    this.anchorUVs = ANCHOR_LANDMARKS.map(group => {
+    const groupUV = (group) => {
       let u = 0, v = 0;
       for (const li of group) {
         const vi = this._vertexForLandmark(li);
         u += obj.uvs[vi * 2]; v += obj.uvs[vi * 2 + 1];
       }
       return [u / group.length, v / group.length];
-    });
+    };
+    this.anchorUVs = ANCHOR_LANDMARKS.map(groupUV);
+    this.anchorUVsExtra = EXTRA_ANCHOR_LANDMARKS.map(groupUV);
 
     // Precompute region vertex lists (unique vertices) for the puppet pass.
     this._regions = {};
@@ -242,8 +288,23 @@ export class MaskScene {
       flipped[1] = [1 - pts[0][0], pts[0][1]];
       pts = flipped;
     }
-    const H = fitHomography(pts, this.anchorUVs);
+    // extra structural pairs (auto-detected) tighten the fit to face structure
+    const dst = this.anchorUVs.slice();
+    if (this._autoPairs && this.anchorUVsExtra) {
+      let pairs = this._autoPairs;
+      if (this.maskFlip) {
+        pairs = pairs.map(p => ({ img: [1 - p.img[0], p.img[1]], uv: p.uv }));
+        for (const [a, b] of [[0, 1], [2, 3], [4, 5]]) { const t = pairs[a]; pairs[a] = pairs[b]; pairs[b] = t; }
+      }
+      for (const p of pairs) { pts.push(p.img); dst.push(p.uv); }
+    }
+    const H = fitHomography(pts, dst);
     if (!H) return;
+    // expression-transfer centers (drawn eye/mouth positions in texture space)
+    const U = this.maskMesh.material.uniforms;
+    U.uEyeL.value.set(pts[0][0], pts[0][1]);
+    U.uEyeR.value.set(pts[1][0], pts[1][1]);
+    U.uMouth.value.set(pts[3][0], pts[3][1]);
     const Hinv = inv3x3(H);
     if (!Hinv) return;
 
@@ -273,6 +334,12 @@ export class MaskScene {
     }
     uvAttr.needsUpdate = true;
     alphaAttr.needsUpdate = true;
+  }
+
+  /** Extra auto-detected image<->canonical pairs for structural fitting. */
+  setAutoPairs(pairs) {
+    this._autoPairs = pairs || null;
+    this.recomputeUVs();
   }
 
   /** Update calibration points without rebuilding the texture (live drag). */
@@ -319,6 +386,20 @@ export class MaskScene {
     this.videoPlane.scale.set(this.mirror ? -this.aspect : this.aspect, 1, 1);
 
     this.pose.tracking = this._hasFace;
+    if (this._hasFace && !this._hadFace) this._smInitW = false; // fresh track: no lag
+    this._hadFace = this._hasFace;
+
+    // blendshape -> expression-transfer uniforms (smoothed)
+    const dtMs = this._lastNow ? Math.min(100, nowMs - this._lastNow) : 16;
+    this._lastNow = nowMs;
+    if (this.maskMesh && this._lastBlendshapes) {
+      const m = this._lastBlendshapes;
+      const U = this.maskMesh.material.uniforms;
+      const k = 1 - Math.exp(-dtMs / 70);
+      U.uBlinkL.value += (smoothstep(0.15, 0.75, m.eyeBlinkLeft || 0) - U.uBlinkL.value) * k;
+      U.uBlinkR.value += (smoothstep(0.15, 0.75, m.eyeBlinkRight || 0) - U.uBlinkR.value) * k;
+      U.uJaw.value += (smoothstep(0.2, 0.85, m.jawOpen || 0) - U.uJaw.value) * k;
+    }
 
     if (this.maskMesh) {
       this.maskMesh.visible = this._hasFace;
@@ -344,7 +425,18 @@ export class MaskScene {
     const b = 1 - a;
     const P = this._snapPrev, C = this._snapCurr, W = this._work;
     for (let i = 0; i < W.length; i++) W[i] = P[i] * b + C[i] * a;
-    return W;
+    // one-euro-lite: exponential smoothing with speed-adaptive time constant —
+    // kills jitter when still, stays responsive when the head moves.
+    const S = this._smW;
+    const dt = Math.min(100, Math.max(1, nowMs - (this._smLast || nowMs - 16)));
+    this._smLast = nowMs;
+    if (!this._smInitW) { S.set(W); this._smInitW = true; return S; }
+    const o = 3; // nose vertex as speed proxy
+    const speed = Math.hypot(W[o] - S[o], W[o + 1] - S[o + 1]) / (dt / 1000);
+    const tau = speed > 1.2 ? 0.02 : speed > 0.4 ? 0.035 : 0.05;
+    const al = 1 - Math.exp(-dt / 1000 / tau);
+    for (let i = 0; i < W.length; i++) S[i] += (W[i] - S[i]) * al;
+    return S;
   }
 
   _updateMesh(nowMs) {
@@ -379,11 +471,11 @@ export class MaskScene {
         pos.setY(vi, cy + (pos.getY(vi) - cy) * f);
       }
     };
-    if (blinkR > 0.05) scaleRegionY(this._regions.eyeR, 1 - 0.4 * blinkR);
-    if (blinkL > 0.05) scaleRegionY(this._regions.eyeL, 1 - 0.4 * blinkL);
+    if (blinkR > 0.05) scaleRegionY(this._regions.eyeR, 1 - 0.55 * blinkR);
+    if (blinkL > 0.05) scaleRegionY(this._regions.eyeL, 1 - 0.55 * blinkL);
     if (jaw > 0.05) {
-      scaleRegionY(this._regions.mouth, 1 + 0.18 * jaw);
-      const drop = 0.012 * jaw;
+      scaleRegionY(this._regions.mouth, 1 + 0.22 * jaw);
+      const drop = 0.016 * jaw;
       const jv = this._regions.jaw;
       for (let k = 0; k < jv.length; k++) pos.setY(jv[k], pos.getY(jv[k]) - drop);
     }

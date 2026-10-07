@@ -46,6 +46,14 @@ first use.
 - **Minimal live UI** — top-right shows only **＋ upload** and **⋯ more**; the ⋯ sheet holds the
   mask gallery, opacity/scale sliders, capture buttons and toggles (mirror, expression boost,
   calibration, debug dots, lite, camera switch). Recording shows a floating red timer pill.
+- **AI expression transfer** — your blendshapes drive the mask artwork: close your eyes and the
+  mask's drawn eyes close (shader UV warp around the detected eye centres); open your mouth and
+  the drawn mouth opens. Jaw, blink and smile also micro-deform the mesh (puppet pass).
+- **Self-fitting masks** — uploaded art is auto-detected (AI face landmarker on the image) and
+  fitted to your face structure with a 12-point homography (eyes, nose, mouth, chin, forehead,
+  mouth corners, brows, cheeks), so any portrait aligns itself automatically.
+- **One-Euro-lite smoothing** — speed-adaptive filtering on the interpolated landmarks: no jitter
+  when still, no lag when moving.
 - **Opacity & scale sliders**, **mirror toggle**, **expression-boost toggle**, landmark debug dots.
 - **📷 Photo capture** and **⏺ video recording** (canvas.captureStream + MediaRecorder, audio
   included when permitted; MP4/WebM depending on browser).

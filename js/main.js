@@ -8,7 +8,7 @@
  * lower still.
  */
 import { FaceTracker } from './face.js';
-import { MaskScene, ANCHOR_LANDMARKS } from './scene.js';
+import { MaskScene, ANCHOR_LANDMARKS, EXTRA_ANCHOR_LANDMARKS } from './scene.js';
 import { parseOBJ } from './geom.js';
 import { TEX_SIZE, loadImageFile, toMaskCanvas, quickRemoveBackground, borderUniformity, aiRemoveBackground } from './bgrm.js';
 import { downloadBlob, captureCanvasPNG, VideoRecorder } from './media.js';
@@ -113,11 +113,24 @@ function anchorsFromLandmarks(lms) {
   });
 }
 
+function extraPairsFromLandmarks(lms) {
+  if (!scene.anchorUVsExtra) return null;
+  return EXTRA_ANCHOR_LANDMARKS.map((group, i) => {
+    let x = 0, y = 0;
+    for (const li of group) { x += lms[li].x; y += lms[li].y; }
+    return { img: [x / group.length, 1 - y / group.length], uv: scene.anchorUVsExtra[i] };
+  });
+}
+
+/** Returns { calib: 6 pts, extra: structural pairs } or null. */
 async function autoCalibrate(canvas) {
   try {
     const lm = await getImageLandmarker();
     const res = lm.detect(canvas);
-    if (res && res.faceLandmarks && res.faceLandmarks.length) return anchorsFromLandmarks(res.faceLandmarks[0]);
+    if (res && res.faceLandmarks && res.faceLandmarks.length) {
+      const lms = res.faceLandmarks[0];
+      return { calib: anchorsFromLandmarks(lms), extra: extraPairsFromLandmarks(lms) };
+    }
   } catch (e) { console.warn('auto-calibrate failed', e); }
   return null;
 }
@@ -126,6 +139,7 @@ async function autoCalibrate(canvas) {
 function applyCurrentMask() {
   const c = state.current;
   if (!c || !c.processed || !c.calib) return;
+  scene.setAutoPairs(c.extra || null);
   scene.setMaskTexture(c.processed, c.calib, c.flip);
   renderThumbs();
   if (state.calibOpen) drawCalib();
@@ -147,9 +161,10 @@ async function ingestUpload(file) {
     applyCurrentMask();
     openCalib();
     const myId = state.current.id;
-    autoCalibrate(orig).then(pts => {
-      if (pts && state.current && state.current.id === myId) {
-        state.current.calib = pts.map(p => ({ x: clamp01(p.x), y: clamp01(p.y) }));
+    autoCalibrate(orig).then(auto => {
+      if (auto && state.current && state.current.id === myId) {
+        state.current.calib = auto.calib.map(p => ({ x: clamp01(p.x), y: clamp01(p.y) }));
+        state.current.extra = auto.extra;
         state.calibCache.set(myId, state.current.calib);
         applyCurrentMask();
         toast('Face found in the artwork — points placed automatically. Fine-tune by dragging.');
@@ -169,12 +184,14 @@ async function applyMaskById(id) {
     const img = await loadImageFromURL(def.src);
     const orig = toMaskCanvas(img);
     let calib = state.calibCache.get(id);
+    let extra = null;
     if (!calib) {
       const auto = await autoCalibrate(orig);
-      calib = auto ? auto.map(p => ({ x: clamp01(p.x), y: clamp01(p.y) })) : DEFAULT_CALIB.map(p => ({ ...p }));
+      calib = auto ? auto.calib.map(p => ({ x: clamp01(p.x), y: clamp01(p.y) })) : DEFAULT_CALIB.map(p => ({ ...p }));
+      extra = auto ? auto.extra : null;
       state.calibCache.set(id, calib);
     }
-    state.current = { id, name: def.name, orig, processed: orig, calib, flip: false };
+    state.current = { id, name: def.name, orig, processed: orig, calib, extra, flip: false };
   } else {
     const m = loadUserMasks().find(x => x.id === id);
     if (!m) return;
@@ -482,10 +499,12 @@ function bindUI() {
   $('calib-auto').addEventListener('click', async () => {
     $('calib-progress').hidden = false;
     $('calib-progress').textContent = 'Detecting face in the artwork…';
-    const pts = await autoCalibrate(state.current.orig);
+    const auto = await autoCalibrate(state.current.orig);
     $('calib-progress').hidden = true;
-    if (pts) {
-      state.current.calib = pts.map(p => ({ x: clamp01(p.x), y: clamp01(p.y) }));
+    if (auto) {
+      state.current.calib = auto.calib.map(p => ({ x: clamp01(p.x), y: clamp01(p.y) }));
+      state.current.extra = auto.extra;
+      scene.setAutoPairs(auto.extra);
       drawCalib(); scene.updateCalib(state.current.calib, state.current.flip);
       toast('Points placed automatically.');
     } else {

@@ -27,6 +27,8 @@ def main():
         page.on('console', lambda m: errors.append(f'console.error: {m.text}') if m.type == 'error'
                 and 'XNNPACK' not in m.text and 'TensorFlow' not in m.text else None)
         page.on('dialog', lambda d: d.accept('AuditCat'))
+        dls = []
+        page.on('download', lambda d: dls.append(d.suggested_filename))
 
         def more_open():
             if page.evaluate("document.getElementById('more').hidden"):
@@ -67,6 +69,13 @@ def main():
                      mtx: r.facialTransformationMatrixes.length,
                      lms: r.faceLandmarks[0].length }; }''')
         check('blendshapes(52) + face matrix live', info['bs'] == 52 and info['mtx'] == 1 and info['lms'] == 478, str(info))
+
+        # --- AI expression transfer: your blink/jaw must drive the mask shader ---
+        E("window.__fmc._fx = setInterval(() => window.__fmc.scene.setBlendshapes({categories:[{categoryName:'eyeBlinkLeft',score:1},{categoryName:'eyeBlinkRight',score:1},{categoryName:'jawOpen',score:1}]}), 20)")
+        page.wait_for_timeout(800)
+        u = E("(() => { const U = window.__fmc.scene.maskMesh.material.uniforms; return [U.uBlinkL.value, U.uBlinkR.value, U.uJaw.value]; })()")
+        E("clearInterval(window.__fmc._fx)")
+        check('expression transfer (blink+jaw -> mask shader)', all(v > 0.5 for v in u), f'uniforms={[round(v,2) for v in u]}')
 
         # --- full-face coverage: alpha hull includes the face oval ---
         alpha_min_face = E('''() => {
@@ -155,13 +164,20 @@ def main():
         with page.expect_download(timeout=15000) as dl:
             page.click('#btn-photo')
         check('photo capture', dl.value.suggested_filename.endswith('.png'))
-        with page.expect_download(timeout=30000) as dl2:
-            page.click('#btn-record'); page.wait_for_timeout(2000)
-            # CI software GL: captureStream readback starves rAF, so playwright
-            # actionability can starve mid-recording; stop via JS click instead
-            # (same app code path as a user tap).
-            E("document.getElementById('btn-rec-chip').click()")
-        check('video record + pill stop', dl2.value.suggested_filename.endswith(('.webm', '.mp4')))
+        # CI software GL: captureStream readback starves rAF, so playwright
+        # actionability can starve mid-recording; drive both taps via JS
+        # (same app code path as a user tap) and poll real state.
+        n0 = len(dls)
+        E("document.getElementById('btn-record').click()")
+        page.wait_for_function('window.__fmc.state.recording === true', timeout=10000)
+        page.wait_for_timeout(1500)
+        E("document.getElementById('btn-rec-chip').click()")
+        page.wait_for_function('window.__fmc.state.recording === false', timeout=10000)
+        for _ in range(40):  # CI software GL can flush the recorder lazily
+            if len(dls) > n0: break
+            page.wait_for_timeout(500)
+        check('video record + pill stop', len(dls) > n0 and dls[-1].endswith(('.webm', '.mp4')),
+              f'last={dls[-1] if dls else None}')
 
         # --- Fix 4 regression: rear camera must not be mirrored ---
         more_open()
