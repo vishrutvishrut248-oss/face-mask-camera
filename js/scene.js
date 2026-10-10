@@ -68,6 +68,7 @@ const MASK_FRAG = /* glsl */`
   uniform float uOpacity;
   uniform float uBlinkL; uniform float uBlinkR; uniform float uJaw;
   uniform vec2 uEyeL; uniform vec2 uEyeR; uniform vec2 uMouth;
+  uniform vec2 uCell; uniform vec2 uCellOff;
   varying vec2 vUv;
   varying float vAlpha;
 
@@ -93,7 +94,8 @@ const MASK_FRAG = /* glsl */`
     vec2 uv = warpEye(vUv, uEyeL, uBlinkL);
     uv = warpEye(uv, uEyeR, uBlinkR);
     uv = warpMouth(uv, uMouth, uJaw);
-    vec4 t = texture2D(map, clamp(uv, 0.0, 1.0));
+    vec2 auv = uCellOff + uv * uCell;   // expression atlas cell
+    vec4 t = texture2D(map, clamp(auv, 0.0, 1.0));
     float a = t.a * vAlpha * uOpacity;
     if (a < 0.004) discard;
     gl_FragColor = vec4(t.rgb, a);
@@ -216,6 +218,8 @@ export class MaskScene {
         uEyeL: { value: new THREE.Vector2(0.35, 0.6) },
         uEyeR: { value: new THREE.Vector2(0.65, 0.6) },
         uMouth: { value: new THREE.Vector2(0.5, 0.3) },
+        uCell: { value: new THREE.Vector2(1, 1) },
+        uCellOff: { value: new THREE.Vector2(0, 0) },
       },
       vertexShader: MASK_VERT, fragmentShader: MASK_FRAG,
       transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
@@ -225,6 +229,31 @@ export class MaskScene {
     this.maskMesh.frustumCulled = false;
     this.maskMesh.position.z = 0.001;
     this.scene.add(this.maskMesh);
+
+    // rigid head shell (hair + silhouette) for atlas masks => FULL head cover.
+    // Follows the head via a per-frame affine fit of the same calib anchors.
+    if (!this.headQuad) {
+      const qgeo = new THREE.PlaneGeometry(2, 2);
+      qgeo.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array([1, 1, 1, 1]), 1));
+      this.headQuad = new THREE.Mesh(qgeo, new THREE.ShaderMaterial({
+        uniforms: {
+          map: { value: null }, uOpacity: { value: 1 },
+          uBlinkL: { value: 0 }, uBlinkR: { value: 0 }, uJaw: { value: 0 },
+          uEyeL: { value: new THREE.Vector2(0.5, 0.5) },
+          uEyeR: { value: new THREE.Vector2(0.5, 0.5) },
+          uMouth: { value: new THREE.Vector2(0.5, 0.5) },
+          uCell: { value: new THREE.Vector2(1, 1) },
+          uCellOff: { value: new THREE.Vector2(0, 0) },
+        },
+        vertexShader: MASK_VERT, fragmentShader: MASK_FRAG,
+        transparent: true, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+      }));
+      this.headQuad.renderOrder = 4;
+      this.headQuad.frustumCulled = false;
+      this.headQuad.matrixAutoUpdate = false;
+      this.headQuad.visible = false;
+      this.scene.add(this.headQuad);
+    }
 
     // Precompute anchor UVs in canonical texture space (vt, v-up).
     const groupUV = (group) => {
@@ -271,6 +300,7 @@ export class MaskScene {
     tex.anisotropy = Math.min(4, this.renderer.capabilities.getMaxAnisotropy());
     this.maskTexture = tex;
     this.maskMesh.material.uniforms.map.value = tex;
+    if (this.headQuad) this.headQuad.material.uniforms.map.value = tex;
     this.calib = calib;
     this.maskFlip = flip;
     this.recomputeUVs();
@@ -342,6 +372,76 @@ export class MaskScene {
     this.recomputeUVs();
   }
 
+  /** Expression-atlas mode: one texture holding cells x cells expressions. */
+  setAtlasMode(on) {
+    this.atlasMode = !!on;
+    const cells = on ? 3 : 1;
+    this._cells = cells;
+    if (!on) {
+      this._setCellUniforms(0, 0, 1, 1);
+      if (this.headQuad) this.headQuad.visible = false;
+    } else {
+      this.setExpressionIndex(this._exprIdx || 0);
+    }
+  }
+
+  /** Switch the displayed expression cell (row-major in the 3x3 atlas). */
+  setExpressionIndex(i) {
+    this._exprIdx = i;
+    if (!this.atlasMode) return;
+    const r = Math.floor(i / 3), c = i % 3;
+    this._setCellUniforms(c / 3, (2 - r) / 3, 1 / 3, 1 / 3);
+  }
+
+  _setCellUniforms(ox, oy, sx, sy) {
+    for (const m of [this.maskMesh && this.maskMesh.material, this.headQuad && this.headQuad.material]) {
+      if (!m) continue;
+      m.uniforms.uCellOff.value.set(ox, oy);
+      m.uniforms.uCell.value.set(sx, sy);
+    }
+  }
+
+  /* Rigid head-shell transform: least-squares affine mapping the calib's
+   * local frame (eyeL/eyeR/forehead/chin) onto the live smoothed landmarks. */
+  _updateHeadQuad() {
+    const W = this._lastW, c = this.calib;
+    if (!W || !c || !this.headQuad) return;
+    const loc = [0, 1, 5, 4].map(i => [(c[i].x - 0.5) * 2, (0.5 - c[i].y) * 2]);
+    const avg = (idxs) => {
+      let x = 0, y = 0;
+      for (const i of idxs) { x += W[i * 3]; y += W[i * 3 + 1]; }
+      return [x / idxs.length, y / idxs.length];
+    };
+    const wpt = [avg([362, 263, 386, 374]), avg([33, 133, 159, 145]), avg([10]), avg([152])];
+    // solve [a b tx; c d ty] via normal equations (3x3, two RHS)
+    let s00 = 0, s01 = 0, s02 = 0, s11 = 0, s12 = 0, s22 = 4;
+    let rx = [0, 0, 0], ry = [0, 0, 0];
+    for (let i = 0; i < 4; i++) {
+      const [u, v] = loc[i], [X, Y] = wpt[i];
+      s00 += u * u; s01 += u * v; s02 += u; s11 += v * v; s12 += v;
+      rx[0] += u * X; rx[1] += v * X; rx[2] += X;
+      ry[0] += u * Y; ry[1] += v * Y; ry[2] += Y;
+    }
+    const det = s00 * (s11 * s22 - s12 * s12) - s01 * (s01 * s22 - s12 * s02) + s02 * (s01 * s12 - s11 * s02);
+    if (!det) return;
+    const inv = [
+      [(s11 * s22 - s12 * s12), -(s01 * s22 - s12 * s02), (s01 * s12 - s11 * s02)],
+      [-(s01 * s22 - s12 * s02), (s00 * s22 - s02 * s02), -(s00 * s12 - s01 * s02)],
+      [(s01 * s12 - s11 * s02), -(s00 * s12 - s01 * s02), (s00 * s11 - s01 * s01)],
+    ].map(r => r.map(v => v / det));
+    const sol = (r) => [
+      inv[0][0] * r[0] + inv[0][1] * r[1] + inv[0][2] * r[2],
+      inv[1][0] * r[0] + inv[1][1] * r[1] + inv[1][2] * r[2],
+      inv[2][0] * r[0] + inv[2][1] * r[1] + inv[2][2] * r[2],
+    ];
+    let [a, b, tx] = sol(rx);
+    let [cc, d, ty] = sol(ry);
+    // widen the shell a touch so real hair/jaw never poke out of the silhouette
+    a *= 1.1; b *= 1.1; cc *= 1.05; d *= 1.05;
+    const M = this.headQuad.matrix;
+    M.set(a, b, 0, tx, cc, d, 0, ty, 0, 0, 1, 0.0005, 0, 0, 0, 1);
+  }
+
   /** Update calibration points without rebuilding the texture (live drag). */
   updateCalib(calib, flip) {
     this.calib = calib;
@@ -404,7 +504,14 @@ export class MaskScene {
     if (this.maskMesh) {
       this.maskMesh.visible = this._hasFace;
       this.maskMesh.material.uniforms.uOpacity.value = this.opacity;
-      if (this._hasFace) this._updateMesh(nowMs);
+      if (this._hasFace) {
+        this._updateMesh(nowMs);
+        if (this.atlasMode && this.headQuad) {
+          this.headQuad.visible = true;
+          this.headQuad.material.uniforms.uOpacity.value = this.opacity;
+          this._updateHeadQuad();
+        }
+      }
     }
     this.dots.visible = this.debugDots && this._hasFace;
     if (this.dots.visible) this._updateDots(nowMs);
@@ -441,6 +548,7 @@ export class MaskScene {
 
   _updateMesh(nowMs) {
     const W = this._fillInterp(nowMs);
+    this._lastW = W;
     const geo = this.maskMesh.geometry;
     const pos = geo.getAttribute('position');
     const lmap = this.obj.landmarkIndexOfVertex;

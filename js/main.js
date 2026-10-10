@@ -27,6 +27,7 @@ const state = {
   rightsOk: false,
   calibOpen: false,
   recording: false,
+  expression: 'happy',
   current: null,   // { id, name, orig(canvas), processed(canvas), calib[{x,y}x6], flip }
   calibCache: new Map(),
 };
@@ -136,11 +137,56 @@ async function autoCalibrate(canvas) {
 }
 
 /* ------------------------------ mask pipeline ---------------------------- */
+/* Expression engine: blendshape rules -> chibi atlas cell. The "trained"
+ * mapping: laugh/cry/angry/surprised/scared/sick/blush/sad/happy. */
+const EXPR_IDX = { happy: 0, laugh: 1, blush: 2, cry: 3, scared: 4, angry: 5, sad: 6, surprised: 7, sick: 8 };
+function classifyExpression(m, pitch) {
+  const g = (n) => m[n] || 0;
+  const smile = Math.max(g('mouthSmileLeft'), g('mouthSmileRight'));
+  const blink = Math.max(g('eyeBlinkLeft'), g('eyeBlinkRight'));
+  const jaw = g('jawOpen');
+  const frown = Math.max(g('mouthFrownLeft'), g('mouthFrownRight'));
+  const browDown = Math.max(g('browDownLeft'), g('browDownRight'));
+  const browInner = g('browInnerUp');
+  const eyeWide = Math.max(g('eyeWideLeft'), g('eyeWideRight'));
+  const sneer = Math.max(g('noseSneerLeft'), g('noseSneerRight'));
+  if (smile > 0.45 && (blink > 0.45 || jaw > 0.35)) return 'laugh';
+  if (frown > 0.25 && browInner > 0.35) return 'cry';
+  if (browDown > 0.35 && frown > 0.15) return 'angry';
+  if (jaw > 0.35 && eyeWide > 0.25) return 'surprised';
+  if (eyeWide > 0.35 && browInner > 0.3) return 'scared';
+  if (sneer > 0.3) return 'sick';
+  if (smile > 0.2 && pitch > 8) return 'blush';
+  if (frown > 0.25) return 'sad';
+  return 'happy';
+}
+let exprCurrent = 'happy', exprLastSwitch = 0;
+const exprHist = [];   // [ts, name] votes inside a sliding window
+function updateExpression(m, now) {
+  const name = classifyExpression(m, scene.pose.pitch);
+  exprHist.push([now, name]);
+  while (exprHist.length && now - exprHist[0][0] > 800) exprHist.shift();
+  if (exprHist.length < 3) return;
+  const votes = {};
+  for (const [, n] of exprHist) votes[n] = (votes[n] || 0) + 1;
+  let best = exprCurrent, bn = 0;
+  for (const n in votes) if (votes[n] > bn) { bn = votes[n]; best = n; }
+  // majority vote + hold: stable switches, no flicker
+  if (best !== exprCurrent && bn >= 3 && bn >= exprHist.length * 0.6 && now - exprLastSwitch > 500) {
+    exprCurrent = best;
+    exprLastSwitch = now;
+    state.expression = best;
+    if (state.current && state.current.atlas) scene.setExpressionIndex(EXPR_IDX[best]);
+  }
+}
+
 function applyCurrentMask() {
   const c = state.current;
   if (!c || !c.processed || !c.calib) return;
   scene.setAutoPairs(c.extra || null);
+  scene.setAtlasMode(!!c.atlas);
   scene.setMaskTexture(c.processed, c.calib, c.flip);
+  if (c.atlas) scene.setExpressionIndex(EXPR_IDX[state.expression] || 0);
   renderThumbs();
   if (state.calibOpen) drawCalib();
 }
@@ -181,6 +227,15 @@ async function applyMaskById(id) {
   if (id.startsWith('builtin-')) {
     const def = BUILTIN_MASKS.find(m => m.id === id);
     if (!def) return;
+    if (def.atlas) {
+      const img = await loadImageFromURL(def.atlas);
+      state.current = {
+        id, name: def.name, orig: img, processed: img,
+        calib: def.calib.map(p => ({ ...p })), extra: null, flip: false, atlas: true,
+      };
+      applyCurrentMask();
+      return;
+    }
     const img = await loadImageFromURL(def.src);
     const orig = toMaskCanvas(img);
     let calib = state.calibCache.get(id);
@@ -223,7 +278,7 @@ function makeThumb(maskLike, { deletable = false } = {}) {
   b.className = 'thumb' + (state.current && state.current.id === maskLike.id ? ' active' : '');
   b.title = maskLike.name;
   const img = document.createElement('img');
-  img.src = maskLike.src || maskLike.dataURL;
+  img.src = maskLike.thumb || maskLike.src || maskLike.dataURL;
   img.alt = maskLike.name;
   img.draggable = false;
   b.appendChild(img);
@@ -604,6 +659,11 @@ async function boot() {
       else if (detectMs > 13) detectEvery = 40;
       else detectEvery = 33;
       scene.ingest(result, ts);
+      if (result.faceBlendshapes && result.faceBlendshapes.length) {
+        const m = {};
+        for (const c of result.faceBlendshapes[0].categories) m[c.categoryName] = c.score;
+        updateExpression(m, ts);
+      }
     };
     tracker.onStatus = (s) => {
       if (s === 'loading-model') setBootStatus('Loading face model + blendshapes…');
@@ -641,4 +701,6 @@ $('btn-start').addEventListener('click', boot);
 window.__fmc = {
   state, scene, tracker, applyMaskById, autoCalibrate,
   perf: () => ({ detectEvery, detectMs: Math.round(detectMs), lite: state.lite }),
+  // test hook: feed blendshape scores straight through the expression engine
+  forceExpression: (m) => updateExpression(m, performance.now()),
 };

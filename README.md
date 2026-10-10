@@ -54,6 +54,11 @@ first use.
   mouth corners, brows, cheeks), so any portrait aligns itself automatically.
 - **One-Euro-lite smoothing** — speed-adaptive filtering on the interpolated landmarks: no jitter
   when still, no lag when moving.
+- **Chibi — the expression-reactive mask** — a 9-expression anime character (happy, laugh,
+  blush, cry, scared, angry, sad, surprised, sick) packed in one atlas. A blendshape voting
+  engine reads YOUR face and switches the mask's expression live; a rigid head shell (hair
+  included) covers your whole head. Built by `tools/make_chibi_atlas.py` (IoU-aligned cells,
+  color-feature registration).
 - **Opacity & scale sliders**, **mirror toggle**, **expression-boost toggle**, landmark debug dots.
 - **📷 Photo capture** and **⏺ video recording** (canvas.captureStream + MediaRecorder, audio
   included when permitted; MP4/WebM depending on browser).

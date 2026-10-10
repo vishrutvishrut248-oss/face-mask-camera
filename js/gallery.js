@@ -5,6 +5,16 @@ export const BUILTIN_MASKS = [
   { id: 'builtin-robot', name: 'Robot', src: 'assets/masks/robot.png', builtin: true },
   { id: 'builtin-cat', name: 'Cat', src: 'assets/masks/cat.png', builtin: true },
   { id: 'builtin-anime', name: 'Anime', src: 'assets/masks/anime.png', builtin: true },
+  // 9-expression atlas character: cells react to your blendshapes; the rigid
+  // head shell covers your WHOLE head (hair included). calib measured at build
+  // time by tools/make_chibi_atlas.py (color-feature registration).
+  {
+    id: 'builtin-chibi', name: 'Chibi', atlas: 'assets/masks/chibi_atlas.png', thumb: 'assets/masks/chibi_thumb.png', builtin: true,
+    calib: [
+      { x: 0.369, y: 0.655 }, { x: 0.636, y: 0.642 }, { x: 0.503, y: 0.699 },
+      { x: 0.489, y: 0.744 }, { x: 0.503, y: 0.899 }, { x: 0.503, y: 0.535 },
+    ],
+  },
 ];
 
 const KEY = 'maskcam.masks.v1';

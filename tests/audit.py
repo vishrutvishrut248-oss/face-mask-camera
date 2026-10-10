@@ -138,7 +138,7 @@ def main():
         saved = E("localStorage.getItem('maskcam.masks.v1') ? JSON.parse(localStorage.getItem('maskcam.masks.v1')).length : 0")
         check('save mask to localStorage', saved == 1, f'count={saved}')
         thumbs = E("document.querySelectorAll('#maskstrip .thumb').length")
-        check('more sheet lists builtins+saved', thumbs == 5, f'thumbs={thumbs}')
+        check('more sheet lists builtins+saved', thumbs == 6, f'thumbs={thumbs}')
         page.click('#maskstrip .thumb .del')
         page.wait_for_timeout(400)
         saved2 = E("JSON.parse(localStorage.getItem('maskcam.masks.v1')||'[]').length")
@@ -194,6 +194,18 @@ def main():
 
         # --- smoothness architecture: adaptive detection cadence must engage
         # when detection is slow (it is, on CI's software renderer) ---
+        # --- chibi: full-head shell + expression-reactive atlas ---
+        more_open()
+        page.click('#maskstrip .thumb:nth-of-type(5)'); page.wait_for_timeout(1500)
+        check('chibi full-head shell visible', E('window.__fmc.scene.headQuad.visible') is True)
+        E("window.__fmc._fx2 = setInterval(() => window.__fmc.forceExpression({jawOpen:0.8, eyeWideLeft:0.6, eyeWideRight:0.6}), 25)")
+        page.wait_for_timeout(1200)
+        expr = E('window.__fmc.state.expression')
+        offx = E("window.__fmc.scene.maskMesh.material.uniforms.uCellOff.value.x")
+        E("clearInterval(window.__fmc._fx2)")
+        check('expression engine reacts (surprised cell)', expr == 'surprised' and abs(offx - 1 / 3) < 0.01,
+              f'expr={expr} offX={offx:.2f}')
+
         perf = E('window.__fmc.perf()')
         check('adaptive detection cadence engaged', perf['detectEvery'] >= 66 and perf['detectMs'] > 24,
               f"detectEvery={perf['detectEvery']}ms detectMs={perf['detectMs']}")
