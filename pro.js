@@ -3,8 +3,8 @@ let hardwareState={},hardwareQueue=Promise.resolve();
 function setupGrade(){
  try{
   if(!grade){grade=new CameraGrade(video,$('graded'));grade.onError=message=>{if(active())stopRecording();notice(message)};buildGradeControls();buildLooks()}
-  grade.resize();$('graded').hidden=false;$('app').classList.add('processed');$('graded').classList.toggle('mirror',video.classList.contains('mirror'));$('looks').hidden=false;
- }catch(e){$('graded').hidden=true;$('app').classList.remove('processed');$('looks').hidden=true;notice('Effects unavailable. Original camera recording only.');console.warn(e);grade=null}
+  grade.resize();$('graded').hidden=false;$('app').classList.add('processed');$('graded').classList.toggle('mirror',video.classList.contains('mirror'));$('looks').hidden=false;$('zoom-controls').hidden=false;setDigitalZoom(grade.zoom);
+ }catch(e){$('graded').hidden=true;$('app').classList.remove('processed');$('looks').hidden=true;$('zoom-controls').hidden=true;notice('Effects unavailable. Original camera recording only.');console.warn(e);grade=null}
 }
 function buildLooks(){
  $('looks').replaceChildren();grade.looks.forEach(([name],i)=>{const b=document.createElement('button');b.textContent=name;b.dataset.look=i;b.setAttribute('aria-pressed',String(i===grade.look));b.onclick=()=>selectLook(i);$('looks').appendChild(b)});
@@ -62,9 +62,14 @@ function applyHardware(key,value){
 $('pro').onclick=()=>{$('pro-panel').hidden=!$('pro-panel').hidden;$('pro').setAttribute('aria-expanded',String(!$('pro-panel').hidden));$('quality').hidden=true};
 $('pro-close').onclick=()=>{$('pro-panel').hidden=true;$('pro').setAttribute('aria-expanded','false')};
 $('output-size').onchange=()=>{if(active()||busy){$('output-size').value=grade?.outputHeight||1080;return}if(grade){grade.outputHeight=+$('output-size').value;grade.resize()}};
-let swipeStart=null;
-$('graded').addEventListener('pointerdown',e=>{swipeStart={x:e.clientX,y:e.clientY};});
+function setDigitalZoom(value){if(!grade)return;grade.zoom=Math.max(1,Math.min(6,value));$('digital-zoom').value=grade.zoom;$('zoom-value').textContent=grade.zoom.toFixed(1)+'×';for(const b of document.querySelectorAll('[data-zoom]'))b.setAttribute('aria-pressed',String(Math.abs(+b.dataset.zoom-grade.zoom)<.03))}
+$('digital-zoom').oninput=e=>setDigitalZoom(+e.target.value);for(const b of document.querySelectorAll('[data-zoom]'))b.onclick=()=>setDigitalZoom(+b.dataset.zoom);
+let swipeStart=null;const pointers=new Map();let pinchDistance=0,pinchZoom=1,wasPinching=false;
+
+$('graded').addEventListener('pointerdown',e=>{pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});swipeStart={x:e.clientX,y:e.clientY};if(pointers.size===2){const [a,b]=[...pointers.values()];pinchDistance=Math.hypot(a.x-b.x,a.y-b.y);pinchZoom=grade?.zoom||1;wasPinching=true}try{e.target.setPointerCapture(e.pointerId)}catch(_){}});
+$('graded').addEventListener('pointermove',e=>{if(!pointers.has(e.pointerId))return;pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});if(pointers.size===2&&pinchDistance>0){const [a,b]=[...pointers.values()];setDigitalZoom(pinchZoom*Math.hypot(a.x-b.x,a.y-b.y)/pinchDistance)}});
 $('graded').addEventListener('pointerup',async e=>{
+ pointers.delete(e.pointerId);if(wasPinching){if(!pointers.size)wasPinching=false;swipeStart=null;return}
  if(!swipeStart)return;const dx=e.clientX-swipeStart.x,dy=e.clientY-swipeStart.y;swipeStart=null;
  if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)*1.3){selectLook(grade.look+(dx<0?1:-1));return}
  if(Math.hypot(dx,dy)>12||!stream)return;
@@ -73,7 +78,10 @@ $('graded').addEventListener('pointerup',async e=>{
  const rect=$('graded').getBoundingClientRect(),ratio=Math.min(rect.width/video.videoWidth,rect.height/video.videoHeight),w=video.videoWidth*ratio,h=video.videoHeight*ratio;
  let x=(e.clientX-rect.left-(rect.width-w)/2)/w,y=(e.clientY-rect.top-(rect.height-h)/2)/h;
  if(x<0||x>1||y<0||y>1)return;if($('graded').classList.contains('mirror'))x=1-x;
+ x=.5+(x-.5)/(grade?.zoom||1);y=.5+(y-.5)/(grade?.zoom||1);
  const ring=$('focus-ring');ring.style.left=e.clientX+'px';ring.style.top=e.clientY+'px';ring.hidden=false;setTimeout(()=>ring.hidden=true,900);
  hardwareState.focusMode=caps.focusMode.includes('single-shot')?'single-shot':'continuous';await applyHardware('pointsOfInterest',[{x,y}]);notice('Focus point requested');refreshHardwareAvailability();
 });
-$('graded').addEventListener('pointercancel',()=>swipeStart=null);
+$('graded').addEventListener('pointercancel',e=>{pointers.delete(e.pointerId);swipeStart=null;if(!pointers.size)wasPinching=false});
+
+$('motion-boost').onclick=async()=>{if(active()||busy){notice('Stop recording before changing motion mode.');return}profile='fast';if(grade){grade.outputHeight=720;$('output-size').value='720'}$('pro-panel').hidden=true;$('pro').setAttribute('aria-expanded','false');await openCamera();notice('Motion boost: 720p / 60 preferred. Actual FPS depends on camera and light.');};
