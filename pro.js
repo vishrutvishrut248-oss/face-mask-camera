@@ -36,7 +36,7 @@ function buildHardware(){
   const cap=caps[key];if(!cap||!Number.isFinite(cap.min)||cap.max<=cap.min){unsupported(label);continue}
   slider(root,'hw-'+key,label,cap.min,cap.max,cap.step||((cap.max-cap.min)/100),settings[key]??cap.min,(value,out)=>{out.value='Requesting…';applyHardware(key,value).then(()=>{const actual=track.getSettings()[key];out.value=actual===undefined?'Unconfirmed':String(Math.round(actual*100)/100)})},v=>String(Math.round(v*100)/100));
  }
- if(caps.torch?.includes(true)){
+ if(caps.torch === true || (Array.isArray(caps.torch) && caps.torch.includes(true))){
   const label=document.createElement('label'),box=document.createElement('input');box.type='checkbox';box.id='hw-torch';box.checked=!!settings.torch;box.onchange=()=>applyHardware('torch',box.checked);label.append(box,' Torch');root.appendChild(label)
  }
  refreshHardwareAvailability();
@@ -69,7 +69,7 @@ $('graded').addEventListener('pointerup',async e=>{
  if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)*1.3){selectLook(grade.look+(dx<0?1:-1));return}
  if(Math.hypot(dx,dy)>12||!stream)return;
  const track=stream.getVideoTracks()[0],caps=track.getCapabilities?.()||{},supported=navigator.mediaDevices.getSupportedConstraints();
- if(!supported.pointsOfInterest||!caps.focusMode?.some(m=>m==='single-shot'||m==='continuous')){notice('Tap focus is not exposed by this camera/browser.');return}
+ if(!supported.pointsOfInterest||!(Array.isArray(caps.focusMode)&&caps.focusMode.some(m=>m==='single-shot'||m==='continuous'))){notice('Tap focus is not exposed by this camera/browser.');return}
  const rect=$('graded').getBoundingClientRect(),ratio=Math.min(rect.width/video.videoWidth,rect.height/video.videoHeight),w=video.videoWidth*ratio,h=video.videoHeight*ratio;
  let x=(e.clientX-rect.left-(rect.width-w)/2)/w,y=(e.clientY-rect.top-(rect.height-h)/2)/h;
  if(x<0||x>1||y<0||y>1)return;if($('graded').classList.contains('mirror'))x=1-x;

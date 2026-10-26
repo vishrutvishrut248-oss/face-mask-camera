@@ -11,7 +11,7 @@ canvas#graded{position:absolute;width:100%;height:100%;object-fit:contain;touch-
 <div class="bottom" id="capture" hidden><button class="icon" id="mic" aria-label="Microphone on" aria-pressed="true"><svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2m-7 9v3m-4 0h8"/></svg></button><button class="record" id="record" aria-label="Start recording"><span></span></button><button class="icon" id="flip" aria-label="Switch camera"><svg viewBox="0 0 24 24"><path d="M8 5H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3M9 5l3-3 3 3M9 9l3 3 3-3"/><circle cx="12" cy="16" r="2"/></svg></button></div>
 <div id="looks" class="looks" aria-label="Swipe cinematic looks" hidden></div><section id="pro-panel" class="panel" hidden><header><h2>Pro studio</h2><button id="pro-close" class="icon" aria-label="Close Pro controls">✕</button></header><div id="grade-controls"></div><h3>RECORDING OUTPUT</h3><label for="output-size">Effects resolution</label><select id="output-size"><option value="1080">1080p preferred · balanced</option><option value="2160">4K preferred · heavier processing</option><option value="720">720p preferred · lighter</option></select><p>Never upscaled. Effects are saved in your video. Processing can reduce FPS.</p><h3>CAMERA HARDWARE</h3><div id="hardware"></div></section><a id="save" hidden download>↓ Save video</a><div id="notice" role="status" hidden></div>
 <div class="gate" id="gate"><svg style="width:42px;height:42px;color:#d9ffb6" viewBox="0 0 24 24"><path d="M8 5l2-2h4l2 2h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/><circle cx="12" cy="12" r="4"/></svg><h1>Just you. Your camera.</h1><button id="start">Open camera</button><p id="error" role="alert" hidden></p></div></main>
-<script src="grade.js"></script>
+<script src="grade.js?v=pro-fix-2"></script>
 <script>
 'use strict';
 const $=id=>document.getElementById(id), video=$('preview');
@@ -36,7 +36,8 @@ async function openCamera(){if(active()||busy)return;lock(true);$('error').hidde
   stream=candidate;video.srcObject=stream;await video.play();video.classList.toggle('mirror',stream.getVideoTracks()[0].getSettings().facingMode==='user');
   stream.getVideoTracks()[0].onended=()=>{notice('Camera disconnected. Open camera again.');if(active())stopRecording();$('gate').hidden=false;$('start').textContent='Reopen camera';$('record').disabled=true};
   $('gate').hidden=true;$('controls').hidden=false;$('capture').hidden=false;$('meter').hidden=false;refreshMode();
-  setupGrade();buildHardware();
+  setupGrade();
+  try{buildHardware()}catch(e){$('hardware').textContent='Pro hardware controls unavailable on this browser. Camera recording is still available.';console.warn('Optional hardware controls:',e)}
   if(!window.MediaRecorder)notice('This browser can preview, but cannot record. Try current Safari or Chrome.');
  }catch(e){stopTracks(stream);stream=null;$('gate').hidden=false;$('error').hidden=false;$('error').textContent=e.name==='NotAllowedError'?'Allow camera access in browser settings, then try again.':e.message;$('start').textContent='Try again';$('controls').hidden=true;$('capture').hidden=true}
  finally{lock(false);$('start').disabled=false}
@@ -81,4 +82,4 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden&&active()){
 window.addEventListener('beforeunload',e=>{if(active()) {e.preventDefault();e.returnValue=''}});
 window.addEventListener('pagehide',()=>{stopTracks(stream);stopTracks(audio);grade?.stopCapture();if(blobURL)URL.revokeObjectURL(blobURL)});
 window.__camera={grade:()=>grade,settings:()=>stream?.getVideoTracks()[0].getSettings(),status:()=>({recording:!!active(),busy,observedFPS,profile,facing,recordedBytes}),stop:stopRecording};
-</script><script src="pro.js"></script></body></html>
+</script><script src="pro.js?v=pro-fix-2"></script></body></html>
