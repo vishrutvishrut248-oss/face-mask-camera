@@ -1,0 +1,51 @@
+import {Input,BlobSource,ALL_FORMATS,VideoSampleSink,CanvasSource,Output,BufferTarget,Mp4OutputFormat,WebMOutputFormat,EncodedAudioPacketSource,EncodedPacketSink,AudioSampleSink,AudioSampleSource,canEncodeVideo,canEncodeAudio} from 'mediabunny';
+import {estimateMotion} from './motion-estimate.js';
+let input,output;
+self.onmessage=async e=>{if(e.data.type!=='export')return;try{await run(e.data)}catch(err){try{await output?.cancel()}catch(_){}input?.dispose();self.postMessage({type:'error',message:err.message||String(err)})}};
+async function run({blob,height=720,grade=null}){
+ if(typeof VideoEncoder==='undefined'||typeof VideoDecoder==='undefined')throw Error('Offline export needs WebCodecs. Update Android Chrome; original recording is still available.');
+ input=new Input({source:new BlobSource(blob),formats:ALL_FORMATS});const video=await input.getPrimaryVideoTrack();if(!video||!await video.canDecode())throw Error('This recorded video codec cannot be decoded on this browser. Original is safe.');
+ const start=await video.getFirstTimestamp(),end=await video.computeDuration(),duration=end-start;
+ if(!(duration>0)||duration>180)throw Error('Smooth export supports clips up to 3 minutes. Keep the original or record a shorter clip.');
+ const sw=await video.getDisplayWidth(),sh=await video.getDisplayHeight(),scale=Math.min(1,height/Math.min(sw,sh)),w=Math.max(2,Math.round(sw*scale/2)*2),h=Math.max(2,Math.round(sh*scale/2)*2),bitrate=Math.min(30000000,Math.max(6000000,w*h*60*.15));
+ let codec='avc',format=new Mp4OutputFormat();if(!await canEncodeVideo(codec,{width:w,height:h,frameRate:60,bitrate})){codec='vp9';format=new WebMOutputFormat();if(!await canEncodeVideo(codec,{width:w,height:h,frameRate:60,bitrate}))throw Error('No supported 60 FPS offline encoder. Original recording is still available.');}
+ const canvas=new OffscreenCanvas(w,h),renderer=new Interpolator(canvas,w,h,grade);output=new Output({format,target:new BufferTarget()});const source=new CanvasSource(canvas,{codec,bitrate,keyFrameInterval:2});output.addVideoTrack(source,{frameRate:60});
+ const audio=await input.getPrimaryAudioTrack();let audioSource,audioTask=null,copyAudio=false;
+ if(audio){const audioCodec=audio.codec;if(format.getSupportedAudioCodecs().includes(audioCodec)){audioSource=new EncodedAudioPacketSource(audioCodec);copyAudio=true}else{const target=codec==='avc'?'aac':'opus';if(!await canEncodeAudio(target))throw Error('Audio cannot be preserved with this export format. Original is safe.');audioSource=new AudioSampleSource({codec:target,bitrate:192000})}output.addAudioTrack(audioSource)}
+ await output.start();
+ if(audio)audioTask=(async()=>{try{if(copyAudio){const config=await audio.getDecoderConfig();for await(const packet of new EncodedPacketSink(audio).packets())await audioSource.add(packet,{decoderConfig:config})}else{for await(const sample of new AudioSampleSink(audio).samples()){await audioSource.add(sample);sample.close()}}}finally{audioSource.close()}})();
+ const sink=new VideoSampleSink(video),iterator=sink.samples()[Symbol.asyncIterator]();let current=(await iterator.next()).value,next=(await iterator.next()).value;
+ if(!current)throw Error('No decodable frames in recording.');
+ let frame=0,pair=-1,lastProgress=0;const total=Math.max(1,Math.ceil(duration*60));
+ while(frame<total){const t=start+frame/60;
+  while(next&&next.timestamp<=t+1e-7){current.close();current=next;next=(await iterator.next()).value;pair=-1;}
+  if(pair!==current.timestamp){renderer.setPair(current,next||current);pair=current.timestamp;}
+  const alpha=next?Math.max(0,Math.min(1,(t-current.timestamp)/(next.timestamp-current.timestamp))):0;
+  renderer.draw(alpha);await source.add(t,1/60);frame++;
+  if(frame-lastProgress>=12||frame===total){lastProgress=frame;self.postMessage({type:'progress',progress:frame/total,frame,total})}
+ }
+ current.close();next?.close();await iterator.return?.();source.close();if(audioTask)await audioTask;await output.finalize();
+ const buffer=output.target.buffer;input.dispose();
+ // Verify written packet timing, rather than trusting a UI label or encoder hint.
+ const verify=new Input({source:new BlobSource(new Blob([buffer])),formats:ALL_FORMATS});const vt=await verify.getPrimaryVideoTrack();let count=0,previous=null,maxError=0;const times=[];for await(const packet of new EncodedPacketSink(vt).packets())times.push(packet.timestamp);times.sort((a,b)=>a-b);for(const time of times){if(previous!==null)maxError=Math.max(maxError,Math.abs(time-previous-1/60));previous=time;count++}
+ verify.dispose();if(count!==total||maxError>.0002)throw Error('Export timing validation failed. Keep the original recording.');
+ self.postMessage({type:'done',buffer,mime:codec==='avc'?'video/mp4':'video/webm',extension:codec==='avc'?'mp4':'webm',frames:count,fps:60,duration:total/60,width:w,height:h,audio:!!audio,method:'bidirectional block-motion interpolation; synthetic frames; not native 60'},[buffer]);
+}
+class Interpolator{
+ constructor(canvas,w,h,grade){
+  this.w=w;this.h=h;this.grade=grade;this.smallW=192;this.smallH=Math.max(8,Math.round(h/w*192));if(this.smallH>256){this.smallW=Math.round(192*w/h);this.smallH=192}
+  this.a=new OffscreenCanvas(w,h);this.b=new OffscreenCanvas(w,h);this.ax=this.a.getContext('2d');this.bx=this.b.getContext('2d');this.small=new OffscreenCanvas(this.smallW,this.smallH);this.sx=this.small.getContext('2d',{willReadFrequently:true});
+  const gl=canvas.getContext('webgl',{alpha:false,antialias:false});if(!gl)throw Error('Offline motion renderer unavailable. Original is safe.');this.gl=gl;
+  const vs='attribute vec2 p;varying vec2 uv;void main(){uv=vec2((p.x+1.)*.5,1.-(p.y+1.)*.5);gl_Position=vec4(p,0.,1.);}';
+  const fs=`precision mediump float;varying vec2 uv;uniform sampler2D oldFrame,newFrame,flow;uniform vec2 smallSize,pixel;uniform float t,cut,zoom,teal,grain,sharp,letterbox,seed;uniform vec4 a,b;uniform vec3 shadowTint,highlightTint;
+  vec3 sampleAt(vec2 q){vec4 m=(texture2D(flow,q)*255.-128.)/8.;vec2 f=m.xy/smallSize,r=m.zw/smallSize;vec3 old=texture2D(oldFrame,clamp(q-f*t,0.,1.)).rgb,fresh=texture2D(newFrame,clamp(q-r*(1.-t),0.,1.)).rgb;if(cut>.5)return t<.5?texture2D(oldFrame,q).rgb:texture2D(newFrame,q).rgb;return mix(old,fresh,t);}
+  void main(){vec2 q=(uv-.5)/zoom+.5;vec3 c=sampleAt(q);if(sharp>0.)c+=sharp*(c-(sampleAt(q+vec2(pixel.x,0.))+sampleAt(q-vec2(pixel.x,0.))+sampleAt(q+vec2(0.,pixel.y))+sampleAt(q-vec2(0.,pixel.y)))*.25);
+  c*=exp2(a.x);float lum=dot(c,vec3(.2126,.7152,.0722));c+=b.x*(1.-smoothstep(0.,.65,lum))*.28;c+=b.y*smoothstep(.4,1.,lum)*.3;c=(c-.5)*a.y+.5;lum=dot(c,vec3(.2126,.7152,.0722));c=mix(vec3(lum),c,a.z);c+=a.w*vec3(.09,.018,-.09);c+=teal*(1.-smoothstep(.1,.65,lum))*vec3(-.035,.025,.045);c+=shadowTint*(1.-smoothstep(.05,.65,lum))+highlightTint*smoothstep(.35,.95,lum);c*=1.-b.z*smoothstep(.25,.73,distance(uv,vec2(.5)));c+=(fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233))+seed)*43758.5453)-.5)*grain*.065;if(letterbox>.5&&(uv.y<.105||uv.y>.895))c=vec3(0.);gl_FragColor=vec4(clamp(c,0.,1.),1.);}`;
+  const compile=(kind,text)=>{const s=gl.createShader(kind);gl.shaderSource(s,text);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s};const p=gl.createProgram();gl.attachShader(p,compile(gl.VERTEX_SHADER,vs));gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw Error('Export shader failed');gl.useProgram(p);
+  const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);const loc=gl.getAttribLocation(p,'p');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);this.u={};for(const name of ['oldFrame','newFrame','flow','smallSize','pixel','t','cut','zoom','teal','grain','sharp','letterbox','seed','a','b','shadowTint','highlightTint'])this.u[name]=gl.getUniformLocation(p,name);
+  this.textures=[];for(let i=0;i<3;i++){gl.activeTexture(gl.TEXTURE0+i);const tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);this.textures.push(tex)}gl.uniform1i(this.u.oldFrame,0);gl.uniform1i(this.u.newFrame,1);gl.uniform1i(this.u.flow,2);gl.uniform2f(this.u.smallSize,this.smallW,this.smallH);gl.uniform2f(this.u.pixel,1/w,1/h);
+ }
+ gray(canvas){this.sx.drawImage(canvas,0,0,this.smallW,this.smallH);const rgba=this.sx.getImageData(0,0,this.smallW,this.smallH).data,result=new Uint8Array(this.smallW*this.smallH);for(let i=0;i<result.length;i++)result[i]=rgba[i*4]*.299+rgba[i*4+1]*.587+rgba[i*4+2]*.114;return result}
+ setPair(old,next){old.draw(this.ax,0,0,this.w,this.h);next.draw(this.bx,0,0,this.w,this.h);const motion=estimateMotion(this.gray(this.a),this.gray(this.b),this.smallW,this.smallH);this.cut=motion.sceneCut;const gl=this.gl;for(let i=0;i<2;i++){gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,this.textures[i]);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,i?this.b:this.a)}gl.activeTexture(gl.TEXTURE2);gl.bindTexture(gl.TEXTURE_2D,this.textures[2]);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,motion.cols,motion.rows,0,gl.RGBA,gl.UNSIGNED_BYTE,motion.data)}
+ draw(alpha){const gl=this.gl,u=this.u,g=this.grade,d=g?.adjust||{},p=g?.preset||[0,1,1,0,0,0,0,0],k=g?.intensity??1,tint=g?.tint||[0,0,0,0,0,0];gl.uniform1f(u.t,alpha);gl.uniform1f(u.cut,this.cut?1:0);gl.uniform1f(u.zoom,g?.zoom||1);gl.uniform4f(u.a,(d.exposure||0)+p[0]*k,(d.contrast??1)*(1+(p[1]-1)*k),(d.saturation??1)*(1+(p[2]-1)*k),(d.warmth||0)+p[3]*k);gl.uniform4f(u.b,(d.shadows||0)+p[4]*k,(d.highlights||0)+p[5]*k,Math.min(1,(d.vignette||0)+p[6]*k),0);gl.uniform3f(u.shadowTint,tint[0]*k,tint[1]*k,tint[2]*k);gl.uniform3f(u.highlightTint,tint[3]*k,tint[4]*k,tint[5]*k);gl.uniform1f(u.teal,p[7]*k);gl.uniform1f(u.grain,d.grain||0);gl.uniform1f(u.sharp,d.sharpness||0);gl.uniform1f(u.letterbox,d.letterbox||0);gl.uniform1f(u.seed,alpha);gl.drawArrays(gl.TRIANGLE_STRIP,0,4)}
+}

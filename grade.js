@@ -33,8 +33,8 @@ window.CameraGrade=class CameraGrade {
   this.u={};for(const n of ['image','pixel','a','b','teal','grain','seed','sharp','letterbox','zoom','shadowTint','highlightTint'])this.u[n]=gl.getUniformLocation(program,n);
   this.texture=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,this.texture);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
   canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();this.failed=true;this.onError?.('Effects renderer stopped. Save your clip and reload.');});
-  this.running=true;let last=-1;
-  const tick=(t)=>{if(!this.running)return;if(video.readyState>=2&&video.currentTime!==last){last=video.currentTime;this.draw(t)}if(video.requestVideoFrameCallback)video.requestVideoFrameCallback(tick);else requestAnimationFrame(tick)};
+  this.running=true;this.previewInterval=0;this.suspended=false;let last=-1,lastDraw=-Infinity;
+  const tick=(t)=>{if(!this.running)return;if(!this.suspended&&video.readyState>=2&&video.currentTime!==last&&t-lastDraw>=this.previewInterval-1){last=video.currentTime;lastDraw=t;this.draw(t)}if(video.requestVideoFrameCallback)video.requestVideoFrameCallback(tick);else requestAnimationFrame(tick)};
   if(video.requestVideoFrameCallback)video.requestVideoFrameCallback(tick);else requestAnimationFrame(tick);
  }
  resize(){const w=this.video.videoWidth,h=this.video.videoHeight;if(!w||!h)return;const factor=Math.min(1,this.outputHeight/Math.min(w,h));this.canvas.width=Math.max(2,Math.round(w*factor/2)*2);this.canvas.height=Math.max(2,Math.round(h*factor/2)*2);this.gl.viewport(0,0,this.canvas.width,this.canvas.height)}

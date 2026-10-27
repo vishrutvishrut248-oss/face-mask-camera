@@ -1,0 +1,7 @@
+This application bundles Mediabunny 1.62.1, Copyright (c) Vanilagy and contributors,
+under the Mozilla Public License 2.0. See MEDIABUNNY-LICENSE.txt.
+Mediabunny library source is unmodified; application worker source is provided
+in export-worker-entry.js and motion-estimate.js in this repository.
+Exact upstream source package:
+https://registry.npmjs.org/mediabunny/-/mediabunny-1.62.1.tgz
+Project: https://github.com/Vanilagy/mediabunny

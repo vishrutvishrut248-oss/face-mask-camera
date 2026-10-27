@@ -74,3 +74,55 @@ can exhaust device memory. Save clips frequently.
   Saved clip decoding confirms digital zoom is in output. API selection tested
   with mocks; synthetic frame patterns verify zoom. No real-phone FPS or thermal
   test performed, and no measured speedup is asserted for physical devices.
+
+## Offline Smooth 60 export (Android / Chrome)
+
+This is a new capture/export path, not another filter-only update.
+
+### User flow
+1. Fast capture is ON by default: MediaRecorder records the camera track directly,
+   avoiding the live canvas readback/encoding bottleneck. Original download is raw.
+   During capture the preview is limited to 540p/24 FPS to leave device headroom;
+   that preview cadence/resolution does NOT set the original camera recording mode.
+2. Selected look, colour controls and digital zoom are frozen at record start.
+3. Stop → original clip available → Smooth 60 FPS export → select 720p/1080p → process.
+4. Worker decodes sequentially, estimates forward/backward block motion on a small
+   luminance image, warps/interpolates adjacent frames, applies the frozen grade,
+   and encodes one frame per 1/60-second timestamp. This is classical synthetic
+   motion interpolation, NOT trained AI, native camera 60 FPS, or recovered detail.
+5. MP4/AVC preferred; VP9/WebM fallback if AVC encoding is unavailable. Audio copied
+   losslessly where compatible or transcoded if required. Original URL is unchanged.
+6. Export validates encoded packet count and 1/60-second timestamp spacing before
+   exposing the result for download. Original stays available if processing fails.
+
+### Dependencies / deployment
+Mediabunny 1.62.1, MPL-2.0, vendored in `vendor/export-worker.js` with license file.
+`export-worker-entry.js` and `motion-estimate.js` are the editable application source.
+Build: `npx esbuild export-worker-entry.js --bundle --format=esm --target=es2022 --minify --outfile=vendor/export-worker.js`.
+Everything runs on device; no server processing, CDN or COOP/COEP headers required.
+WebCodecs, worker OffscreenCanvas/WebGL and suitable codecs must be available.
+
+### Research
+- MDN captureStream: https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/captureStream
+- MDN requestVideoFrameCallback: https://developer.mozilla.org/en-US/docs/Web/API/HTMLVideoElement/requestVideoFrameCallback
+- Mediabunny quick start: https://mediabunny.dev/guide/quick-start
+- Mediabunny media sources: https://mediabunny.dev/guide/media-sources
+
+### Measured verification (synthetic sources, NOT a phone-quality benchmark)
+- Browser camera-to-export integration: direct camera path, audio preservation,
+  original download unchanged, no upscaling, decoded Mono grade and download pass.
+- Controlled 10 FPS input, duration 0.5s -> 30 encoded output frames at 60 FPS.
+  Maximum timestamp-step error: 5.20e-17s. Intermediate-frame mean error against
+  known 2px motion: 3.29, versus 84.31 for a repeated-frame reference. This validates
+  non-duplicate intermediate-frame synthesis in this controlled translation case.
+- Existing 21 Pro, 14 camera, 12 motion/zoom, and 6 torch regressions pass.
+
+### Limits
+- Experimental low-resolution block matching is NOT studio optical flow quality.
+  Hands, occlusions, fast motion, flashing lights and detailed edges can warp or ghost.
+- Scene-cut heuristic avoids some cross-cut synthesis; it is not infallible.
+- Export caps: 3 minutes, 350 MiB source, at most 1080p preferred (never upscaled).
+  In-memory output can still exhaust a low-memory phone. Start with short clips.
+- Processing can take longer than the video. Keep tab visible/device awake. Cancellation
+  terminates the worker and preserves the original. No universal codec/hardware guarantee.
+- No real Android phone FPS, latency, thermals, artifact quality or long-clip test performed.

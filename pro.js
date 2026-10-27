@@ -9,7 +9,7 @@ function setupGrade(){
 function buildLooks(){
  $('looks').replaceChildren();grade.looks.forEach(([name],i)=>{const b=document.createElement('button');b.textContent=name;b.dataset.look=i;b.setAttribute('aria-pressed',String(i===grade.look));b.onclick=()=>selectLook(i);$('looks').appendChild(b)});
 }
-function selectLook(index){if(!grade)return;grade.look=(index+grade.looks.length)%grade.looks.length;for(const b of $('looks').children)b.setAttribute('aria-pressed',String(+b.dataset.look===grade.look));$('looks').children[grade.look].scrollIntoView({behavior:'smooth',block:'nearest',inline:'center'})}
+function selectLook(index){if(!grade||(active()&&$('fast-capture').checked))return;grade.look=(index+grade.looks.length)%grade.looks.length;for(const b of $('looks').children)b.setAttribute('aria-pressed',String(+b.dataset.look===grade.look));$('looks').children[grade.look].scrollIntoView({behavior:'smooth',block:'nearest',inline:'center'})}
 function slider(parent,id,label,min,max,step,value,onchange,format=v=>Number(v).toFixed(2)){
  const wrap=document.createElement('div'),lab=document.createElement('label'),out=document.createElement('output'),input=document.createElement('input');input.type='range';input.id=id;input.min=min;input.max=max;input.step=step;input.value=value;out.value=format(value);out.htmlFor=id;lab.htmlFor=id;lab.textContent=label;lab.appendChild(out);input.oninput=()=>{out.value=format(+input.value);onchange(+input.value,out)};wrap.append(lab,input);parent.appendChild(wrap);return input;
 }
@@ -62,7 +62,7 @@ function applyHardware(key,value){
 $('pro').onclick=()=>{$('pro-panel').hidden=!$('pro-panel').hidden;$('pro').setAttribute('aria-expanded',String(!$('pro-panel').hidden));$('quality').hidden=true};
 $('pro-close').onclick=()=>{$('pro-panel').hidden=true;$('pro').setAttribute('aria-expanded','false')};
 $('output-size').onchange=()=>{if(active()||busy){$('output-size').value=grade?.outputHeight||1080;return}if(grade){grade.outputHeight=+$('output-size').value;grade.resize()}};
-function setDigitalZoom(value){if(!grade)return;grade.zoom=Math.max(1,Math.min(6,value));$('digital-zoom').value=grade.zoom;$('zoom-value').textContent=grade.zoom.toFixed(1)+'×';for(const b of document.querySelectorAll('[data-zoom]'))b.setAttribute('aria-pressed',String(Math.abs(+b.dataset.zoom-grade.zoom)<.03))}
+function setDigitalZoom(value){if(!grade||(active()&&$('fast-capture').checked))return;grade.zoom=Math.max(1,Math.min(6,value));$('digital-zoom').value=grade.zoom;$('zoom-value').textContent=grade.zoom.toFixed(1)+'×';for(const b of document.querySelectorAll('[data-zoom]'))b.setAttribute('aria-pressed',String(Math.abs(+b.dataset.zoom-grade.zoom)<.03))}
 $('digital-zoom').oninput=e=>setDigitalZoom(+e.target.value);for(const b of document.querySelectorAll('[data-zoom]'))b.onclick=()=>setDigitalZoom(+b.dataset.zoom);
 let swipeStart=null;const pointers=new Map();let pinchDistance=0,pinchZoom=1,wasPinching=false;
 
